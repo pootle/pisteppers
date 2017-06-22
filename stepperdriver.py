@@ -7,7 +7,6 @@ from collections import deque
 import heapq
 import socket
 import messageMan_sel as mms
-import stellarGeometry as sg
 
 class motor():
     """
@@ -54,6 +53,7 @@ class motor():
         self.motmode='idle' # or 'fastwave', 'slowstep'
         self.parent=parent
         self.currentposition = 0 # current position of motor in finest resolution microsteps
+        self.stepfactor = 0
         self.settings={}
         self.updatesettings(**kwargs)
         self.logmsg(level=mms.LOGLVLLIFE, action='motor control', status='started', message='')
@@ -143,7 +143,7 @@ class motor():
         returns a dict with the current state
         """
         tpos = self.getpos()
-        return {'steppos':tpos, 'degpos': stepstodeg(tpos), 'action':self.motmode
+        return {'steppos':tpos, 'degpos': self.stepstodeg(tpos), 'action':self.motmode
             , 'forward':(self.stepfactor > 0), 'microstep':abs(self.stepfactor)}
 
 ###################################################################################################
@@ -856,153 +856,9 @@ class onewave(mms.timerSelector):
             else:
                 yield (ponbits, poffbits, nextpulsedue), None if donepulsers is None else tuple(pg[3][1] for pg in donepulsers)
 
-class smartmount(onewave):
-    """
-    stepper motor based moving updated with functions for a telescope mount
-    """
-    def goto(self, **kwargs):
-        target = self._resolveLocationParams('goto', **kwargs)
-        if target is None:
-            return   #couldn't make sense of the params
-        if isinstance(target, sg.motorPair):
-            movedef = self._bestmovetime(target)
-        elif isinstance(target, sg.localEquatorial):
-            targetpair = self._convertlocal(target)
-            targetmoves = tuple(self._bestmovetime(mpair) for mpair in targetpair)
-            bm1 = max(targetmoves[0]['RA'][0], targetmoves[0]['DEC'][0])
-            bm2 = max(targetmoves[1]['RA'][0], targetmoves[1]['DEC'][0])
-            movedef = targetmoves[0] if bm1 < bm2 else targetmoves[1]
-        else:
-            self.logmsg(level=mms.LOGLVLFAIL, action=request, status='failed', message='unable to use a' + str(type(target)))
-            return
-
-        self.logmsg(level=mms.LOGLVLDETAIL, action='goto', status='started', func='goto', message=str(target))
-        moveparams=[]
-        for mot, mmove in movedef.items():
-            if abs(mmove[2])>16:
-                msets = self.motors[mot].fastdefaults.copy()
-                msets['forward'] = mmove[1] >= 0
-                msets['totalsteps'] = mmove[2]
-                msets['motor']=mot
-                moveparams.append(msets)
-        self.logmsg(action='goto', status='progress', level=mms.LOGLVLINFO
-            , message=', '.join('%s move by %3.2f should take %3.2f seconds' % (mot, mmove[1], mmove[0]) for mot, mmove in movedef.items()))
-        if len(moveparams) > 0:
-            self.wavepulsemaker(pulseparams=moveparams)
-        else:
-            self.logmsg(action='run agent', status='complete', level=mms.LOGLVLINFO,message='no movement required')
-        return
-
-    def setPosition(self, **kwargs):
-        """
-        Set the mount motor positions from the given arguments.
-
-        If the mount has been moved manually, or the current sky position has been accurately measured by plate solving
-        or equivalent, then use this to update the mount's position. This can only be done when idle or tracking, not when fast 
-        slewing.
-        """
-        target = self._resolveLocationParams('setPosition', **kwargs)
-        if target is None:
-            return
-        self.motors['RA'].setpos(target.ramot.deg)
-        self.motors['DEC'].setpos(target.decmot.deg)
-        self.logmsg(level=mms.LOGLVLDETAIL, action='setposition', status='complete', func='setPosition', message=str(target))
-
-    def updatesettings(self, **updatesdict):
-        for k,v in updatesdict.items():
-            self.motors[k].updatesettings(**v)
-
-    def _resolveLocationParams(self, request, **kwargs):
-        """
-        housekeeping routine for setPosition and goto functions. Checks state and parses params to create and return 
-        a stellarGeometry object, which can be one of several types defining the target in different ways 
-        """
-        fails=[]
-        for motor in self.motors.values():
-            if not motor.motmode in ('slowstep','idle'):
-                fails.append(motor.mname + ' cannot goto from state ' + motor.motmode)
-        if len(fails) > 0:
-            self.logmsg(level=mms.LOGLVLFAIL, action=request, status='failed', message=', '.join(fails))
-            return None
-        return sg.makeGeom(**kwargs)
-
-    def _convertlocal(self, lcoords):
-        """
-        returns the 2 solutions for mount positions to match the given local equatorial co-ordinates
-        
-        dec 0 to 90 => motor 0 to 90, 180 to 90
-        dec -1 to - 90 => motor 359 to 270, 181 to 270
-        """ 
-        hours=lcoords.hour.deg
-        dec=lcoords.dec.deg
-        targetabove = not 90 < hours < 270
-        sols=[]
-        decwrap = (dec+90)%180-90
-        if dec>=0:
-            decs = (decwrap, 180-decwrap)
-        else:
-            decs = (360+decwrap,180-decwrap)
-        rams=((hours) % 360, (hours+180) % 360)
-        for ram in rams:
-            for decm in (decs):
-                if self.aboveeqh(ram,decm) == targetabove:
-                    sols.append(sg.motorPair(ramot=ram, decmot=decm))
-                    print(sols[-1])
-        return sols
-
-    def _bestmovetime(self, motpair):
-        """
-        given a motorPair returns the fastest move time for the target location
-        """
-        targvals={'RA': motpair.ramot.deg, 'DEC': motpair.decmot.deg}
-        return {mname: mot.timetomove(target=targvals[mname])[0] for mname, mot in self.motors.items()}
-
-    def aboveeqh(self, hapos, decpos):
-        if hapos <= 90 or hapos >= 270:
-            return decpos < 90 or decpos > 270
-        else:
-            return 90 < decpos < 270
-
-    def resolvetarget(self, hours, dec):
-        """
-        returns the 2 solutions for mount positions to match the given local equatorial co-ordinates
-        
-        dec 0 to 90 => motor 0 to 90, 180 to 90
-        dec -1 to - 90 => motor 359 to 270, 181 to 270
-        """ 
-        targetabove = not 90 < hours < 270
-        sols=[]
-        decwrap = (dec+90)%180-90
-        if dec>=0:
-            decs = (decwrap, 180-decwrap)
-        else:
-            decs = (360+decwrap,180-decwrap)
-        for ram in ((hours) % 360, (hours+180) % 360):
-            for decm in (decs):
-                if self.aboveeqh(ram,decm) == targetabove:
-                    sols.append((ram,decm))
-
-        print("dec %4.1f gives decs: %4.1f, %4.1f" %(dec, decs[0],decs[1]))
-        print("target1 ramotor:%4.1f, dec %4.1f, target2 ramotor:%4.1f, dec:%4.1f" %(sols[0][0],sols[0][1],sols[1][0],sols[1][1]))
-        decmotpos= self.motors[motorDEC].position
-        ramotpos = self.motors[motorRA].position
-        moves = tuple(((self.quick360(sol[0]-ramotpos), self.quick360(sol[1]-decmotpos)) for sol in sols))
-        m1 = max(abs(moves[0][0]), abs(moves[0][1]))
-        m2 = max(abs(moves[1][0]), abs(moves[1][1]))
-        print("target 1 max %3.1f, target 2 max %3.1f." %(m1,m2))
-        print(moves)
-        if m1 > m2:
-            return (sols[1], sols[0])
-        return sols
-
-    def quick360(self, move):
-        if move > 180:
-            return move-360
-        if move < -180:
-            return move+360
-        return move
-
-if __name__=="__main__":
-    import mountSetup
-    sa = smartmount(**mountSetup.mountParams)
-    sa.runforever()
+LOGLVLFAIL=mms.LOGLVLFAIL
+LOGLVLSTATE=mms.LOGLVLSTATE
+LOGLVLLIFE=mms.LOGLVLLIFE
+LOGLVLINFO=mms.LOGLVLINFO
+LOGLVLDETAIL=mms.LOGLVLDETAIL
+LOGLVLSCHED=mms.LOGLVLSCHED
