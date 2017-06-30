@@ -55,10 +55,10 @@ class motor():
         self.currentposition = 0 # current position of motor in finest resolution microsteps
         self.stepfactor = 0
         self.settings={}
-        self.updatesettings(**kwargs)
+        self.updateSettings(**kwargs)
         self.logmsg(level=mms.LOGLVLLIFE, action='motor control', status='started', message='')
 
-    def updatesettings(self, name=None, loglevel=None, pins=None, maxval=None, fastdefaults=None, flipdir=None):
+    def updateSettings(self, name=None, loglevel=None, pins=None, maxval=None, fastdefaults=None, flipdir=None):
         changelog=[]
         if not name is None and self.settings.get('name',None) != name:
             changelog.append("motor name updated from %s to %s" % (self.settings.get('name','<none>'), name))
@@ -88,7 +88,7 @@ class motor():
             if not fastdefaults is None:
                 self.fastdefaults=fastdefaults
         else:
-            self.notifyFail(action='updatesettings', status='failed', reason='wrong mode'
+            self.notifyFail(action='updateSettings', status='failed', reason='wrong mode'
                 , message="cannot update some settings in mode  >%s<." % str(self.motmode))
         print(changelog)
 
@@ -181,8 +181,10 @@ class motor():
         else:
             self.slowstepsleft = -1
         self.slowstepfullrate = steprate
-        self.slowticktime = 1 / (self.slowstepfullrate * warp / 16)
-        print("tick tim is ", self.slowticktime)
+        try:
+            self.slowticktime = 1 / (self.slowstepfullrate * warp / 16)
+        except ZeroDivisionError:
+            self.slowticktime = 10
         self.slowtickdue = time.time()
         self.slowpulsetime = pulseontime
         self._enabledrive(True)
@@ -202,7 +204,7 @@ class motor():
                 self.slowmovestop('slowmove tick count reached')
                 return
         self.slowtickdue = self.slowtickdue + self.slowticktime
-        self.parent.setpollat(self.slowtickdue,self.slowmovetick)
+        self.parent.runat(self.slowtickdue,self.slowmovetick)
 
     def slowmovestop(self, msg):
         self.motmode = 'idle'
@@ -250,21 +252,21 @@ class motor():
         if not self._set_ms_mode_dir(warp, forward):
             self.notifyFail(action='pulsegen', status='failed', reason='bad parameter', message="invalid warp factor provided %s" % str(warp))
             return None
-        dividestepsby = max(self.microstepset.keys())/warp
-        totalsteps = int(totalsteps / dividestepsby)
+        dividestepsby = round(max(self.microstepset.keys())/warp)
+        totalticks = round(totalsteps / dividestepsby)
         startsr = startsr / dividestepsby
         maxsr = maxsr / dividestepsby
         self.lastpulseoffset = 0
         self.motmode ='fastwave'
         self._enabledrive(True)
         self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='started'
-                , message="mode now %s. %d microticks, microstepping 1/%d" % (self.motmode, totalsteps, warp))
+                , message="mode now %s. %d microsteps, %d ticks, microstepping 1/%d" % (self.motmode, totalsteps, totalticks, warp))
         tickunit = 1000000                  # the underlying time is microseconds - this converts seconds to microseconds
         target   = maxsr*overreach          # asymptotically approach this step rate so we actually intercept the maximum rate
         trange   = (target-startsr)*ramp    # pre-calculate the range of rates we will use
         elapsed  = ramp                     # start at ramp for easy calculation
         ramping  = True
-        flipover = totalsteps/2             # check if we reach this step count during ramp up and switch direct to ramp down
+        flipover = totalticks/2             # check if we reach this step count during ramp up and switch direct to ramp down
         self.pulseAbort = None
         yield self.steppinmask, 0, 0
         yield 0, self.steppinmask, pulseontime
@@ -276,28 +278,30 @@ class motor():
                 tps = maxsr
             ticksec = 1 / tps
             elapsed += ticksec
-            yield self.steppinmask, 0, int(ticksec*tickunit)-pulseontime
+            yield self.steppinmask, 0, round(ticksec*tickunit)-pulseontime
             yield 0, self.steppinmask, pulseontime
             self.gensteps += 1
             if self.gensteps >= flipover:
                 ramping = False
 
         if self.pulseAbort is None:
-            maxcount = totalsteps-(self.gensteps*2)     # ticks to do at full speed (-ve if we are already half way)
+            maxcount = round(totalticks-(self.gensteps*2))     # ticks to do at full speed (-ve if we are already half way)
             self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress'
-                    , message="ramp up complete at %5.2f in %4.2f ticks with %5.2f to do at full speed" % (
-                        elapsed-ramp, self.gensteps/warp, (0 if maxcount < 0 else maxcount/warp)))
-            tick = int(tickunit / maxsr)-pulseontime
+                    , message="ramp up complete at %5.4f in %d ticks with %d to do at full speed" % (
+                        elapsed-ramp, self.gensteps, (0 if maxcount < 0 else maxcount)))
+            tick = round(tickunit / maxsr)-pulseontime
             ticksec = 1/maxsr 
         else:
             if self.pulseAbort == 'softstop':
                 maxcount = -1     # skip straight to ramp down
-                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress', message="ramp up aborted at %5.2f in %4.2f ticks." % (
-                        elapsed-ramp, self.gensteps/warp))
-                totalsteps = self.gensteps *2 # update total ticks to twice ticks spent ramping up so far
+                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress'
+                    , message="ramp up aborted at %5.2f in %d ticks - %d microsteps." % (
+                        elapsed-ramp, self.gensteps, self.gensteps*dividestepsby))
+                totalticks = self.gensteps *2 # update total ticks to twice ticks spent ramping up so far
             else:
-                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='complete', message="ramp up crash stop at %5.2f in %d ticks." % (
-                        elapsed-ramp, self.gensteps/warp))
+                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='complete'
+                    , message="ramp up crash stop at %5.2f in %d ticks." % (
+                        elapsed-ramp, self.gensteps))
                 return
         ramptime = elapsed
         rampticks = self.gensteps
@@ -309,18 +313,18 @@ class motor():
             self.gensteps += 1
         if not self.pulseAbort is None:
             if self.pulseAbort == 'softstop':
-                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress', message="full speed aborted at %5.2f in %5.2f ticks." % (
-                        elapsed-ramp, self.gensteps/warp ))
-                totalsteps = self.gensteps+rampticks
+                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress'
+                    , message="full speed aborted at %5.2f in %d ticks." % (elapsed-ramp, self.gensteps))
+                totalticks = self.gensteps+rampticks
             else:
                 self.motmode='idle'
-                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='complete', message="ramp up crash stop at %5.2f in %5.2f ticks." % (
-                    elapsed-ramp, self.gensteps/warp ))
+                self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='complete', message="ramp up crash stop at %5.2f in %d ticks." % (
+                    elapsed-ramp, self.gensteps))
                 return
 
         timeleft = ramptime
         self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='progress', message="starting ramp down")
-        while self.gensteps < totalsteps and (self.pulseAbort is None or self.pulseAbort == 'softstop'):
+        while self.gensteps < totalticks and (self.pulseAbort is None or self.pulseAbort == 'softstop'):
             tps = target + trange / -timeleft
             if tps < startsr:
                 tps = startsr
@@ -328,14 +332,16 @@ class motor():
                 tps = maxsr
             ticksec = 1 / tps
             timeleft -= ticksec
-            yield self.steppinmask, 0, int(ticksec*tickunit)-pulseontime
+            yield self.steppinmask, 0, round(ticksec*tickunit)-pulseontime
             yield 0, self.steppinmask, pulseontime
+            elapsed += ticksec
             self.gensteps += 1
 
         if self.pulseAbort == 'softstop':
             self.logmsg(level=mms.LOGLVLSTATE, action='softstop', status='complete', message="")
         self.logmsg(level=mms.LOGLVLSTATE, action='pulsegen', status='complete'
-            , message="pulse train complete in %5.2f ticks" % (self.gensteps/warp))
+            , message="pulse train complete in %d ticks - %d microsteps, expected time %3.2f" % (
+                self.gensteps, self.gensteps*dividestepsby, elapsed-ramp))
 
     def pulsereached(self,faststeps):
         """
@@ -363,7 +369,7 @@ class motor():
             self.notifyFail(action='pulsegen', status='failed', reason='bad parameter', message="invalid warp factor provided %s" % str(warp))
             return None
         dividestepsby = max(self.microstepset.keys())/warp
-        ticksteps = int(totalsteps / dividestepsby)
+        ticksteps = round(totalsteps / dividestepsby)
         startsr = startsr / dividestepsby
         maxsr = maxsr / dividestepsby
         tickunit = 1000000                  # the underlying time is microseconds - this converts seconds to microseconds
@@ -371,7 +377,7 @@ class motor():
         trange   = (target-startsr)*ramp    # pre-calculate the range of rates we will use
         elapsed  = ramp                     # start at ramp for easy calculation
         ramping  = True
-        flipover = ticksteps/2             # check if we reach this step count during ramp up and switch direct to ramp down
+        flipover = ticksteps/2              # check if we reach this step count during ramp up and stop
         ramptime = pulseontime
         stepcount = 1                       # maintain count of steps issued
         while ramping:
@@ -381,16 +387,19 @@ class motor():
                 tps = maxsr
             ticksec = 1 / tps
             elapsed += ticksec
-            ramptime += int(ticksec*tickunit)
+            ramptime += round(ticksec*tickunit)
             stepcount += 1
             if stepcount >= flipover:
                 ramping = False
-        return stepcount, ramptime/1000000, (stepcount >= flipover)
+        return stepcount*dividestepsby, ramptime/1000000, (stepcount >= flipover)
 
-    def constPulseCalc(self, totalsteps, maxsr):
+    def constPulseCalc(self, totalsteps, maxsr, warp):
+        dividestepsby = max(self.microstepset.keys())/warp
+        ticksteps = round(totalsteps / dividestepsby)
+        maxsr = maxsr / dividestepsby
         tickunit = 1000000
-        tick = int(tickunit / maxsr)
-        return (tick * totalsteps)/1000000
+        tick = round(tickunit / maxsr)
+        return (tick * ticksteps)/1000000
 
     def timetomove(self, target=None, angle=None):
         """
@@ -401,8 +410,7 @@ class motor():
         Settings is a tuple of:
             move time
             signed move in degrees
-            (unsigned) step count
-            
+            (unsigned) step count  
         """
         if target is None:
             fwang=angle % 360
@@ -417,7 +425,8 @@ class motor():
         if nomiddle:
             ftime=elapsed*2
         else:
-            ftime=elapsed*2 + self.constPulseCalc(totalsteps=fwdsteps-2*fcount, maxsr=msets['maxsr'])
+            mcount = fwdsteps-2*fcount
+            ftime=elapsed*2 + self.constPulseCalc(totalsteps=mcount, maxsr=msets['maxsr'], warp=msets['warp'])
         msets['forward'] = False
         revsteps = self.degtosteps(revang)
         msets['totalsteps'] = revsteps
@@ -425,7 +434,7 @@ class motor():
         if nomiddle:
             rtime=elapsed*2
         else:
-            rtime=elapsed*2 + self.constPulseCalc(totalsteps=revsteps-2*rcount, maxsr=msets['maxsr'])
+            rtime=elapsed*2 + self.constPulseCalc(totalsteps=revsteps-2*rcount, maxsr=msets['maxsr'],warp=msets['warp'])
         if ftime < rtime:
             return (ftime, fwang, fwdsteps), (rtime,  -revang, revsteps)
         else:
@@ -597,16 +606,6 @@ class onewave(mms.timerSelector):
 
     def crashstop(self):
         self._stopfromfast(m.crashstop, 'crashstop')
-        
-    def slowRun(self, slowparams):
-        """
-        Give a tuple of slowparams, passes each set of params to the relevant motor.
-        """
-        for pset in slowparams:
-            paramset = pset.copy()
-            assert paramset['motor'] in self.motors
-            mkey = paramset.pop('motor')
-            self.motors[mkey].slowmove(**paramset)
 
     def wavepulsemaker(self, pulseparams):
         """
@@ -692,6 +691,7 @@ class onewave(mms.timerSelector):
         for m,info in waveends.items():
             if info[1]:
                 self.motors[m].pulsedone(info[0])
+                self.motorfastends(m)
                 self.activewavemotors = tuple(mid for mid in self.activewavemotors if mid != m)
             else:
                 self.motors[m].pulsereached(info[0])
