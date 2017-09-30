@@ -603,8 +603,11 @@ def makeagents():
         , {'name':'DEC', 'loglevel':7, 'pins':{'enable':25, 'direction': 18, 'step': 27, 'steplevels': (24,23,22)}}))
     return clif(inq=respq, outq=cmdq)
 
-
-#    clif=stepwavetest.makeagents()
-#    m1p={'motor':'RA', 'startsr':300, 'maxsr':900, 'overreach':1.1, 'ramp':1, 'totalsteps':1*16*48*120, 'pulseontime':2, 'forward':True,'warp':2}
-#    m2p={'motor':'DEC', 'startsr':300, 'maxsr':850, 'overreach':1.1, 'ramp':.5, 'totalsteps':1*16*48*95, 'pulseontime':2, 'forward':True,'warp':2}
-#    clif.runmotors((m1p,m2p))
+# Example use
+# import stepwavetest as st
+# clif=st.makeagents()
+# m1p={'motor':'RA', 'startsr':300, 'maxsr':900, 'overreach':1.1, 'ramp':1, 'totalsteps':1*16*48*120, 'pulseontime':2, 'forward':True,'warp':2}
+# m2p={'motor':'DEC', 'startsr':300, 'maxsr':850, 'overreach':1.1, 'ramp':.5, 'totalsteps':1*16*48*95, 'pulseontime':2, 'forward':True,'warp':2}
+# clif.runmotors((m1p,))
+# clif.runmotors((m2p,))
+# clif.runmotors((m1p, m2p))
