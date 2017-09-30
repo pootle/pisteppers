@@ -105,7 +105,6 @@ class simpleAgent():
     def wrappedRunMethod(self, meth, kwargs):
         msgStartTime = time.time()
         msgCPUstart = time.process_time()
-#        meth(**kwargs)
         try:
             meth(**kwargs)
         except Exception as e:
@@ -223,7 +222,6 @@ class motor():
         ramp        : factor used to control the rate of ramp
         totalsteps  : total number of steps to take
         pulseontime : the number of microseconds to hold the pulse on
-        pulsebits   : the bits which will be turned on and off for each pulse
         """
         if self.mode == 'fastwave':
             self.notifyStateUpdate(4, 'pulsegen', 'failed', "cannot do fast pulses - already active")
@@ -259,7 +257,7 @@ class motor():
                 ramping = False
             yield self.steppinmask, 0, int(ticksec*tickunit)-pulseontime
             yield 0, self.steppinmask, pulseontime
-    
+
         if self.pulseAbort is None:
             maxcount = totalsteps-(tot_ticks*2)     # ticks to do at full speed (-ve if we are already half way)
             self.notifyStateUpdate(2, 'pulsegen', 'progress', "ramp up complete at %5.2f in %d ticks with %d to do at full speed" % (
@@ -345,13 +343,13 @@ class onewave(simpleAgent):
 
     def softstop(self):
         if self.activeaction != None:
-            for m in self.motors:
+            for m in self.motors.values():
                 m.pulseAbort = 'softstop'
             self.sendStateUpdate(action='softstop', status='started', message='')
 
     def crashstop(self):
         if self.activeaction != None:
-            for m in self.motors:
+            for m in self.motors.values():
                 self.pulseAbort = 'crash'
             self.sendStateUpdate(action='crashstop', status='started', message='')
        
@@ -446,6 +444,7 @@ class onewave(simpleAgent):
 
     def checkFinal(self):
         if self.pio.wave_tx_busy():
+            self.setpollfrom(.2, self.checkFinal)
             return
         for wid in self.wavids:
             self.pio.wave_delete(wid)
@@ -454,7 +453,6 @@ class onewave(simpleAgent):
                     , message="wave %d deleted." % (wid))
         self.allstop()
         self.sendStateUpdate(action=self.activeaction, status='complete', message="all done in %d waves" % self.wavecount)
-        self.setTimeout(None, None)
         self.activeaction = None
 
     def prepareWave(self):
@@ -562,7 +560,7 @@ class onewave(simpleAgent):
 
 class clif(simpleAgent):
     """
-    a very basic agent running in its own thread prints responses and can be used to send to another agent
+    a very basic agent running in its own thread that prints responses and can be used to send to another agent
     """
     def statusUpdate(self, agent, action, status, message):
         """
@@ -577,11 +575,36 @@ class clif(simpleAgent):
         if action=='run agent' and status=='complete':
             self.running=False
 
-def makeagent():
+    def stop(self):
+        """
+        closes down motors - uses rampdown if they are running in wave mode
+        """
+        self.runit('softstop')
+
+    def crash(self):
+        """
+        instantly stops motors - accurate position will be lost if they are running fast
+        """
+        self.runit('crash')
+
+    def runmotors(self,paramslist):
+        """
+        run motors using a list of parameters - 1 list entry per motor.
+        
+        See motor.pulser for details on the parameters to pass to each motor
+        """
+        self.runit('wavepulsemaker',pulseparams=paramslist)
+
+def makeagents():
     cmdq = queue.Queue(5)
     respq = queue.Queue(5)
     sa = onewave(inq=cmdq, outq=respq, motors=(
           {'name':'RA',  'loglevel':7, 'pins':{'enable':21, 'direction': 12, 'step': 13, 'steplevels': (20,19,16)}}
         , {'name':'DEC', 'loglevel':7, 'pins':{'enable':25, 'direction': 18, 'step': 27, 'steplevels': (24,23,22)}}))
-    ui = clif(inq=respq, outq=cmdq)
-    return ui
+    return clif(inq=respq, outq=cmdq)
+
+
+#    clif=stepwavetest.makeagents()
+#    m1p={'motor':'RA', 'startsr':300, 'maxsr':900, 'overreach':1.1, 'ramp':1, 'totalsteps':1*16*48*120, 'pulseontime':2, 'forward':True,'warp':2}
+#    m2p={'motor':'DEC', 'startsr':300, 'maxsr':850, 'overreach':1.1, 'ramp':.5, 'totalsteps':1*16*48*95, 'pulseontime':2, 'forward':True,'warp':2}
+#    clif.runmotors((m1p,m2p))
