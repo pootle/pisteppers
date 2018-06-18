@@ -62,7 +62,11 @@ class simpleAgent():
                     if nexttimerdue is None:
                         inMsgMeth, inMsgKwargs = self.inq.get()
                     else:
-                        inMsgMeth, inMsgKwargs = self.inq.get(block=True, timeout=nexttimerdue-time.time())
+                        tdelay=nexttimerdue-time.time()    # add fix to prevent calling get with negative timeout
+                        if tdelay  <= 0:
+                            inMsgMeth, inMsgKwargs = self.inq.get(block=False)
+                        else:
+                            inMsgMeth, inMsgKwargs = self.inq.get(block=True, timeout=nexttimerdue-time.time())
                 except queue.Empty:
                     nexttimerdue = heapq.heappop(self.timervals)
                     self.wrappedRunMethod(self.timers.pop(nexttimerdue),{})
