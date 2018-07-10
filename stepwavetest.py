@@ -487,9 +487,12 @@ class onewave(simpleAgent):
             m._enabledrive(False)
 
     def done(self):
-        self.pio.stop()
-        self.running = False
-        self.sendStateUpdate(action='run agent', status='complete', message="closed")
+        if self.activeaction is None:
+            self.pio.stop()
+            self.running = False
+            self.sendStateUpdate(action='run agent', status='complete', message="closed")
+        else:
+            self.sendStateUpdate(action='run agent', status='failed', message='"done" cannot finish - %s' % self.activeaction)
 
     def setpin(self,pin,val):
         self.pio.write(pin,val)
@@ -591,6 +594,12 @@ class clif(simpleAgent):
         """
         self.runit('crash')
 
+    def exit(self):
+        """
+        makes the agent exit immediately after disabling motor drive pins - only works if motors inactive
+        """
+        self.runit('done')
+
     def runmotors(self,paramslist):
         """
         run motors using a list of parameters - 1 list entry per motor.
@@ -615,3 +624,4 @@ def makeagents():
 # clif.runmotors((m1p,))
 # clif.runmotors((m2p,))
 # clif.runmotors((m1p, m2p))
+# clif.exit()
