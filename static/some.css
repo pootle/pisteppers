@@ -1,0 +1,141 @@
+body {
+    background-color: #405050;
+    color: white;
+}
+
+.stgpnl{
+    float: left;
+}
+
+.overpnl{
+    float: left;
+    width: 690px;
+}
+
+img.cbtn{
+    width:50;
+    height:50;    
+}
+
+input{
+    background-color: black;
+    color: white;
+}
+
+select{
+    background-color: black;
+    color: white;
+}
+
+.camsetstyle{
+    background-color: darkblue;
+    color: white;
+}
+
+.camstreamstyle{
+    background-color: darkred;
+    color: white;
+}
+
+.gpio_triggerstyle{
+    background-color:darkgreen;
+    color: white;
+}
+
+.trig_recordstyle{
+    background-color: purple;
+    color: white;
+}
+
+.cpumovestyle{
+    background-color: darkorchid;
+    color: white;
+}
+
+.btnlike{
+    display: inline-block;
+    padding: 6px 12px;
+    margin-bottom: 0;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.42857143;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: middle;
+    -ms-touch-action: manipulation;
+    touch-action: manipulation;
+    cursor: pointer;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    background-image: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    text-decoration: none;
+    color: #333;
+    background-color: #fff;
+    border-color: #ccc;
+}
+
+.btnoff{
+    display: inline-block;
+    padding: 6px 12px;
+    margin-bottom: 0;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.42857143;
+    text-align: center;
+    white-space: nowrap;
+    vertical-align: middle;
+    -ms-touch-action: manipulation;
+    touch-action: manipulation;
+    cursor: pointer;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+    background-image: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    text-decoration: line-through;
+    color: #333;
+    background-color: #ccc;
+    border-color: #aaa;
+}
+
+.sectheadtext{
+    font-size:15pt;
+    font-weight: bold;
+    padding-top: 8px;
+    padding-bottom: 3px;
+    text-align: center;
+}
+
+.sectheadoc{
+    float: right;
+    width:40px; 
+    height:40px;
+}
+
+.fieldlabel{
+    text-align: right;
+    padding-bottom: 1px;
+    padding-right: 8px;
+}
+
+.fieldhelp{
+    text-align: center;
+}
+.fieldlink:hover{
+    color: white;
+}
+.fieldlink:visited{
+    color:Gainsboro;
+}
+.fieldlink:link{
+    color: silver;   
+}
+.fieldlink:active{
+    color: silver; 
+}

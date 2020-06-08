@@ -1,0 +1,24 @@
+<html>
+    <header>
+        <script src="static/pymon.js"></script>
+        <script type="text/javascript">
+            window.onload=startup
+
+            function startup() {{
+                liveupdates("{pageid}")
+            }}
+        </script>
+        <link rel="stylesheet" href="static/some.css">
+    </header>
+    <body><form autocomplete="off">
+        <table style="border-spacing: 0px;" class=class="focusstyle" >
+           <col style="width:220px;">
+           <col style="width:320px;">
+           <col style="width:90px;">
+           <tr>
+                <td colspan="3" class="sectheadtext" >Simple stepper control</td>
+           </tr>
+           {fields}
+        </table>
+    </form></body>
+</html>
