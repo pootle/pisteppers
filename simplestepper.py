@@ -329,16 +329,19 @@ class stepper(wv.watchablepigpio):
                     time.time()-abs_start, time.process_time()-abs_process, time.thread_time()-abs_thread))
         return
 
-    def _thwaitq(self, waittill):
+    def _thwaitq(self, waittill=None, delay=None):
         """
-        waits on the command q till at most waittill.
+        uses delay if set, otherwise calculates required delay.
+
+        waits on the command q till for at most the required delay
         
         if nothing arrived on the q it returns True
         
-        if anything returned on the q and has been processed it returns False (to signify the target time has not been reached)
-        this allows loops to react quickly to change settings
+        if anything returned on the q and has been processed it returns False (to signify the target time has not been reached, but
+        something has changed), this allows loops to react quickly to change settings
         """
-        delay=waittill-time.time()
+        if delay is None:
+            delay=waittill-time.time()
         try:
             if delay <= 0:
                 self.overrunctr+=1
@@ -351,7 +354,7 @@ class stepper(wv.watchablepigpio):
         if method is None:
             return True
         method(**kwargs)
-        return delay <= 0
+        return False
 
     def _thsetValue(self, value, agent):
         if agent in self.app.agentclass:
@@ -374,9 +377,13 @@ class stepper(wv.watchablepigpio):
             holdtimeout=time.time() + self.holdstopped.getValue()
         self.log(loglvls.INFO, "%s entering mode 'stopped'" %self.name)
         while self.mode.getIndex() == 1:
-            self._thwaitq(time.time()+1 if holdtimeout is None else holdtimeout)
+            if holdtimeout:
+                self._thwaitq(waittill=holdtimeout)
+            else:
+                self._thwaitq(delay=1)
             if holdtimeout and holdtimeout < time.time():
                 self.drive_enable.setValue('disable',wv.myagents.app)
+                holdtimeout=None
         self.log(loglvls.INFO, "%s leaving mode 'stopped'" % self.name)
 
     def _thrun_faststep(self):
@@ -385,7 +392,7 @@ class stepper(wv.watchablepigpio):
         """
         self.log(loglvls.INFO, "%s entering mode 'faststep'" % self.name)
         while self.mode.getIndex() == 4:
-            self._thwaitq(time.time()+1)
+            self._thwaitq(delay=1)
         self.log(loglvls.INFO, "%s leaving mode 'faststep'" % self.name)
 
     def tickgen(self):
@@ -662,15 +669,13 @@ class multimotor(wv.watchablepigpio):
             ('pigpbpw',     wv.intWatch,    0,                  False),
             ('mode',        wv.enumWatch,   controllermodes[1], False,  {'vlist': controllermodes}),
             ('gotonow',     wv.btnWatch,    'goto now',         False),
-            ('wavepulses',  wv.intWatch,    1500,               True,   {'minv':100}),
+            ('wavepulses',  wv.intWatch,    1000,               True,   {'minv':100}),
         ]
         super().__init__(wabledefs=wables, loglevel=loglvls.DEBUG, **kwargs)
         self.pigpmspw.setValue(self.pio.wave_get_max_micros(), wv.myagents.app)
         self.pigpppw.setValue(self.pio.wave_get_max_pulses(), wv.myagents.app)
         self.pigpbpw.setValue(self.pio.wave_get_max_cbs(), wv.myagents.app)
         self.motors={}
-        print(self.startsettings.keys())
-        print(motors)
         for motname, motclass in motors:
             newmotor=self.makeChild(defn=(motname, motclass, None, False, {'name': motname}), value=self.startsettings.get(motname,{}))
             if newmotor is None:
@@ -813,11 +818,9 @@ class multimotor(wv.watchablepigpio):
                             self.log(loglvls.DEBUG,'wave delete failed for wave %d with %s' % (donebuf, pendingbufs))
                         endposns = buffends.pop(0)
                         for mn, mp in endposns.items():
-#                            self[mn+'/rawposn'].setValue(mp,'driver')
                             self.motors[mn].rawposn.setValue(mp, wv.myagents.app)
                     elif current == pendingbufs[0]:
                         pass
-#                        self.log(loglvls.DEBUG,'wave %d running' % current)
                     else:
                         self.log(loglvls.DEBUG,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAArg')
 
@@ -832,11 +835,10 @@ class multimotor(wv.watchablepigpio):
                     endposns = buffends.pop(0)
                     for mn, mp in endposns.items():
                         self.motors[mn].rawposn.setValue(mp, wv.myagents.app)
-                        print('--------pos updated')
                 elif current ==pendingbufs[0]:
                     self.log(loglvls.DEBUG,'wave %d running' % current)
                 else:
-                    self.log(loglvls.DEBUG,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAArg')
+                    self.log(loglvls.DEBUG,'BBBBBBBBBBBBBBBBBBBBBBBBBBAArg')
 #            self.pigp.wave_clear()
             if not logf is None:
                 logf.close()
@@ -898,21 +900,19 @@ class multimotor(wv.watchablepigpio):
                         except StopIteration:
                             mpulses[nx] = None
 
-pinsm1={
+#pinsm1={
+#    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
+#}
 
-    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
-}
+#pinsm2={
+#    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
+#}
 
-pinsm2={
-
-    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
-}
-
-m1params={
-    '12V':    {'minslow': .0027, 'usteplevel':2},
-    'ra24V':  {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
-    'dec24V': {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
-    'ra24vfast': {'minslow': .0010, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
-    'dec24Vfast': {'minslow': .0011, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
-}
+#m1params={
+#    '12V':    {'minslow': .0027, 'usteplevel':2},
+#    'ra24V':  {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
+#    'dec24V': {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
+#    'ra24vfast': {'minslow': .0010, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
+#    'dec24Vfast': {'minslow': .0011, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
+#}
 # note 24v values work with both motors running in slow mode

@@ -56,7 +56,7 @@
             }
         },
         "fast": {
-            "minstep": 0.00125,
+            "minstep": 0.00115,
             "startstep": 0.005,
             "rampfact": 1.08,
             "rampintvl": 0.1,
@@ -127,7 +127,7 @@
             }
         },
         "fast": {
-            "minstep": 0.0012,
+            "minstep": 0.00105,
             "startstep": 0.005,
             "rampfact": 1.05,
             "rampintvl": 0.07,

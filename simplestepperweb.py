@@ -4,7 +4,7 @@ from pootlestuff.watchables import myagents
 
 import pootlestuff.watchables as wv
 
-from webstrings import tablefieldinputhtml, tablefielddropdnhtml, tablefieldcyclicbtndnhtml, tablesectwrapper
+from webstrings import tablefieldinputhtml, tablefielddropdnhtml, tablefieldcyclicbtndnhtml, tablesectwrapper, tablefieldstatic
 
 import locale
 locale.setlocale(locale.LC_ALL, '')
@@ -31,7 +31,7 @@ class webapp(simplestepper.multimotor):
                     pagecols[mfn].append(mf)
                 else:
                     pagecols[mfn]=[mf]
-        fields += '<tr><td></td>'+ ''.join(['<td>%s</td>' % mn for mn in self.motors.keys()]) + '</tr>\n'
+        fields += '<tr><td></td>'+ ''.join(['<td><span class="sectheadtext" >%s</span></td>' % mn for mn in self.motors.keys()]) + '</tr>\n'
         for row in pagecols.values():
             rowlink, rowstrs =row[0]
             colitems=[]
@@ -70,12 +70,12 @@ class webapp(simplestepper.multimotor):
             self.mode.setValue('faststep', myagents.user)
 
 topfielddefs=(
-    (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       'motorset controller mode'),
-    (pagelink.wwbutton,'gotonow',   myagents.user,  'goto now',             tablefieldcyclicbtndnhtml,  'starts motors running in their selected mode'),
     (pagelink.wwlink, 'pigpmspw',   myagents.NONE,  'max us per wave',      tablefieldinputhtml,        'maximum microseconds per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
     (pagelink.wwlink, 'pigpppw',    myagents.NONE,  'max pulses per wave',  tablefieldinputhtml,        'maximum pulses per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
     (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,        'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
     (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        'max pulses per wave - if pigpio runs out of CBs, decrease this'),
+    (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       'motorset controller mode'),
+    (pagelink.wwbutton,'gotonow',   myagents.user,  'run now',              tablefieldcyclicbtndnhtml,  'starts motors running in their selected mode'),
 )
 
 class webgroup():
@@ -89,7 +89,8 @@ class webgroup():
         
         This object is used to create the html snippets for the various parts of the field. If it is not updateable it is discarded after the page is built
         """
-        return defn[0](wable=getattr(self, defn[1]), pagelist=pagelist, updators=defn[2], label=self.prefix+defn[3], shelp=defn[5], **(defn[6] if len(defn) > 6 else {}))
+        return defn[0](wable=None if defn[0] == pagelink.wwdummy else getattr(self, defn[1]),
+                        pagelist=pagelist, updators=defn[2], label=defn[3], shelp=defn[5], **(defn[6] if len(defn) > 6 else {}))
 
     def makefieldset(self, pagelist, fieldlist=None):
         return {self.prefix+fname: (self.makefield(pagelist, self.webdefs[fname]), self.webdefs[fname][4]) for fname in (self.webdefs.keys() if fieldlist is None else fieldlist)}
@@ -110,13 +111,13 @@ motorfields=(
     (pagelink.wwenum, 'mode',       myagents.app,   'motor mode',      tablefielddropdnhtml,       'motor controller mode'),
     (pagelink.wwenum, 'start_mode', myagents.user,  'initial mode',    tablefielddropdnhtml,       'mode used when motor initialised'),
     (pagelink.wwenum, 'runmode',    myagents.user,  'next action mode',tablefielddropdnhtml,       'mode for next controller move'),
+    (pagelink.wwlink, 'targetrawpos',myagents.user, 'target position' ,tablefieldinputhtml,        'target absolute position in microsteps'),
     (pagelink.wwlink, 'drive_enable',myagents.NONE, 'drive enable pin',tablefieldinputhtml,        'gpio (broadcom) pin used to drive enable this motor', {'liveformat': '{wl.wable.pinno:d}'}),
     (pagelink.wwlink, 'direction',  myagents.NONE,  'direction pin',   tablefieldinputhtml,        'gpio (broadcom) pin used to set step direction for this motor', {'liveformat': '{wl.wable.pinno:d}'}),
     (pagelink.wwlink, 'step',       myagents.NONE,  'step pin',        tablefieldinputhtml,        'gpio (broadcom) pin used to step this motor', {'liveformat': '{wl.wable.pinno:d}'}),
     (pagelink.wwlink, 'holdstopped',myagents.user,  'stop hold time',  tablefieldinputhtml,        'when motor stops, disable output current after this time (in seconds) - 0 means drive chip stays enabled'),
     (pagelink.wwenum, 'usteplevel', myagents.user,  'microstep level', tablefielddropdnhtml,       'selects level of microstepping to use'),
     (pagelink.wwlink, 'rawposn',    myagents.app,   'current position',tablefieldinputhtml,        'current absolute position in microsteps (does not vary with changes to microstep level)'),
-    (pagelink.wwlink, 'targetrawpos',myagents.user, 'target position' ,tablefieldinputhtml,        'target absolute position in microsteps'),
 )
 
 motorfieldindex={f[1]: f for f in motorfields}
@@ -124,7 +125,9 @@ motorfieldindex={f[1]: f for f in motorfields}
 class webstepcontrols(simplestepper.stepcontrols, webgroup):
     def __init__(self, **kwargs):
         simplestepper.stepcontrols.__init__(self, **kwargs)
-        webgroup.__init__(self, webdefs=stepfieldindex, prefix=self.name)
+        sfi={'stephead': (pagelink.wwdummy,'settings',   myagents.NONE,   'stepper settings',       tablefieldstatic,           None, {'value':self.name}),}
+        sfi.update(stepfieldindex)
+        webgroup.__init__(self, webdefs=sfi, prefix=self.name)
 
 stepcontrolfields=(
      (pagelink.wwlink, 'minstep',    myagents.user,   'minimum step interval',  tablefieldinputhtml,        'absolute lower limit on step interval in seconds'),

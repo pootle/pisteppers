@@ -148,7 +148,7 @@ class wwlink():
         if self.updators:   # an id and class instance is only needed if there are going to be dynamic updates (in either direction)
             self.fid=self.pagelist.add_field(userupa=userupa, liveupa=liveupa, updators=updators, upper=self, usefid=fixedfid)
             if self.updators & self.pagelist.liveupdate:
-                self.wable.log(wv.loglvls.INFO,'setting notify for var value %s' % self.wable.getValue())
+                self.wable.log(wv.loglvls.DEBUG,'setting notify for var value %s' % self.wable.getValue())
                 self.wable.addNotify(self.varchanged, self.pagelist.liveupdate)
 
     def varchanged(self, watched=None, agent=None, newValue=None, oldValue=None):
@@ -217,6 +217,14 @@ class wwlink():
             return {'OK': True, 'value': self.webvalue}
         else:
             return {'OK' : False, 'fail': 'bad request'}
+
+class wwdummy(wwlink):
+    """
+    A degnerate link that just enables a heading or other fixed column heading to be inserted
+    """
+    def __init__(self, value, **kwargs):
+        self.value=value
+        super().__init__(**kwargs)
 
 class wwtime(wwlink):
     """

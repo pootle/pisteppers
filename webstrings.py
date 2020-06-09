@@ -5,7 +5,7 @@ fieldshelp      = 'title="{wl.shelp}"'
 fieldfhelp      = '<a class="fieldlink" href="{wl.doclink}" rel="noopener noreferrer">details</a>'
 fielduinput     = '<input type="text" value="{wl.webvalue}" style="width: 8em" {tattrs}/>' # for input fields that use input with type="text"
 fieldnouser     = '<span {tattrs}>{wl.webvalue}</span>'
-
+fielddummy      = '<span class="sectheadtext" {tattrs}>{wl.value}</span>'
 fieldudropdn= '''<select {tattrs} >{wl.webvalue}</select>'''  # for input fields that use a drop down selection
 
 fieldcyclicbtn = '<div class="btnlike" {tattrs}>{wl.webvalue}</div>'
@@ -35,6 +35,13 @@ tablefieldcyclicbtndnhtml = {
     'fhelp' : fieldfhelp,
     'fieldu': fieldcyclicbtn,
     'fieldf': fieldnouser, 
+}
+
+tablefieldstatic = {
+    'label': fieldlabel,
+    'shelp' : fieldshelp,
+    'fhelp' : fieldfhelp,
+    'fieldf': fielddummy, 
 }
 
 # wraps a set of fields as part of an existing table. 1 row with a header which has a button to open and close the group of fields that follow
