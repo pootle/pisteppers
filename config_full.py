@@ -7,7 +7,8 @@ This module is loaded by webserv.py and various entries are used by webserv.py t
 """
 
 from pootlestuff import basichttpserver as httpbase   # this module should contain the classes httpserver and httprequh
-import pathlib
+from pootlestuff.watchables import loadsettings
+import pathlib, sys
 
 import simplestepperweb
 
@@ -37,11 +38,10 @@ httpserverclass = httpbase.httpserver
 # this is the class instantiated to handle each incoming http request
 httprequestclass = httpbase.httprequh
 
-settingsfile = 'motorset.json'  #
+settingsfile = 'motorset.json'  # default motor settings file
 
 def setup(settings):
-    app1 = simplestepperweb.webapp(value=settingsfile if settings is None else settings,
-                                   motors=[('m1', simplestepperweb.webmotor), ('m2', simplestepperweb.webmotor)]) #, pigp=pilog.plog()
+    app1 = simplestepperweb.webapp(value=settingsfile if settings is None else settings)
     ddef = {
     'staticroot'        : {'path':pathlib.Path(__file__).parent/'static', 'root':'/stat/'}, # specifies the folder in which static files are found
     'app'               : app1,

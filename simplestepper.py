@@ -81,6 +81,7 @@ class gpio_out_pin(wv.enumWatch):
         super().__init__(value=val, vlist=vl, app=app, **kwargs)
         if self.pinno > 0:
             self.pigp.set_mode(self.pinno, pigpio.OUTPUT)
+            self._setPin(self.getIndex())
             self.log(loglvls.INFO, '%s (pin %d) set for output, initialised to %s (%0d)' % (self.name, self.pinno, val, vl.index(val)))
         else:
             self.log(loglvls.INFO, 'no physical pin for %s' % self.name)
@@ -109,6 +110,30 @@ class gpio_out_pin(wv.enumWatch):
             return super().getValue()
         else:
             return  {k: getattr(self,k) for k in ('name', 'pinno', 'pud', 'vlist', 'value', 'closevalue', 'loglvl')}
+
+    def getBits(self, value=None, agent=None):
+        """
+        returns the bits-on / bits-off for the pin to use with pigpio waves.
+        
+        With default value, it returns the current value bit patterns, if the value is provided it returns the bits
+        for that value.
+        
+        Once a wave cycle is complete resetValue should be called so the gpio pin and the stored value here are consistent.
+        """
+        if value is None:
+            value=super().getValue()
+        if self.pinno < 0:
+            return None, None
+        bim=1<<self.pinno
+        return (0,bim) if value == self.vlist[0] else (bim,0)
+
+    def resetValue(self, value=None, agent=None):
+        if value is None:
+            value=self.getValue()
+        else:
+            value=self.validValue(self, value, agent)
+            self._val=value
+        self._setPin(0 if value==self.vlist[0] else 1)
 
     def __repr__(self):
         return str(self.getValue())
@@ -201,12 +226,50 @@ class usteplevel_pinset(wv.enumWatch):
             self.log(loglvls.CRITICAL, 'agent {} not known in setting var {}'.format(agent, self.name))
         return False
 
-class stepcontrols(wv.watchablesmart):
+class stepgen(wv.watchablesmart):
+    """
+    base class for tick interval generator
+    """
+    def __init__(self, name, motor, value, wabledefs, **kwargs):
+        """
+        base class for step interval generators.
+        
+        name:   it's the name!
+        
+        motor:  the motor that owns this generator
+        
+        mode:   defines if this generator should use software to drive the stepping, or DMA (high precision) to drive the stepping
+        
+        stepclass: class for the generator (just here to stop it being an unexpected parameter
+        """
+        self.name=name
+        self.motor=motor
+        self.mode=value['mode']
+        wabledefs.append(('usteps',   wv.enumWatch,   2,     False,    {'vlist': motor.usteplevel.vlist})),     # selects the microstep level to use with these settings)
+        super().__init__(value=value, wabledefs=wabledefs, **kwargs)
+
+    def log(self, *args, **kwargs):
+        self.motor.log(*args, **kwargs)
+
+    def tickgen(self):
+        raise NotImplementedError()
+
+class stepcontrolgrad(stepgen):
     """
     This class implements the details of step timing with parameters to control the various speeds and
-    ramping up and down 
+    ramping up and down.
+    
+    Use of a separate class allows multiple different sets of timings to be used, as well as different
+    methods for generating the timings.
+    
+    It provides a generator that yields a sequence of step intervals. If no step is required it returns
+    None.
+    
+    this class ramps speed up by applying a scale factor to difference between the target speed and the current
+    speed, this results in an asymptotic approach to the target speed. A small fiddle factor is added to the change
+    so we reach the target rather then playing tortoise and hare.
     """
-    def __init__(self, name, **kwargs):
+    def __init__(self, **kwargs):
         wables=[
             ('minstep',         wv.floatWatch,      .0017,      False),     # minimum step interval (-> fastest speed)
             ('startstep',       wv.floatWatch,      .006,       False),     # initial interval when starting
@@ -215,12 +278,253 @@ class stepcontrols(wv.watchablesmart):
             ('rampticks',       wv.intWatch,        7700,       False),     # number of ticks to stop from max slow speed
             ('ramputicks',      wv.intWatch,        0,          False),     # actual ticks used to ramp up / down
         ]
-        self.name=name
         super().__init__(wabledefs=wables, **kwargs)
 
-#modevals=('closed', 'off', 'stopped', 'slowstep', 'faststep')
-modevals=('closed', 'stopped', 'slowgoto', 'slowtrack', 'fastgoto')
-#            0          1          2            3           4
+    def tickgen(self):
+        """
+        generator function for step times.
+        
+        yields a sequence of 3-tuples until target is reached, at which point it returns None for the time interval.
+        This function keeps it's own time so can generate ticks independent of actual time - the caller must sync
+        to a clock if required.
+        
+        each tuple is:
+            0 : None if direction pin is unchanged, else the new value for the direction pin
+            1 : time in seconds to the next step pin trigger - None if no step required (e.g. at target pos)
+            2 : raw position after this step is issued
+        """
+        isgoto=self.motor.opmode.getValue()=='going'
+                        # set up functions to directly access the various info needed - dynamic fetch allows update on the fly
+        if isgoto:
+            targetposget= self.motor.targetrawpos.getValue      # target position when in goto mode
+        else:
+            targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
+        uslevelget  = self.motor.usteplevel.getValue        # current microstep level
+        starttickget= self.startstep.getValue               # minimum time for a first tick
+        mintickget=self.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
+        tickget=self.motor.ticktime.getValue                # current target tick time - 0 gives max speed in this mode (clamped to 'minslow')
+        ramptget=self.rampticks.getValue                    # number of ticks needed to slow down from max speed (takes too long to calculate on the fly)
+        rampintvlget=self.rampintvl.getValue
+        rampfactget=self.rampfact.getValue
+        currentposv=self.motor.rawposn.getValue()           # get the current position - we assume we are in control of this so don't re-read it
+        utickctr=0
+        currenttick=None                                    # set stationary
+        elapsedtime=0.0
+        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelget()))
+        while True:
+            dirset=None
+            uslevelv=uslevelget()
+            usteps=self.motor.maxstepfactor // uslevelv
+            if isgoto:
+                movesteps=targetposget()-currentposv
+                if abs(movesteps) < usteps:                     # if less than the current step size stop now before we start
+                    yield (None, None, currentposv)
+                    currenttick=None 
+            else:
+                movesteps=None
+            if currenttick is None:                             # been stopped - what to do?
+                if self.motor.pending:
+                    yield (None, None, currentposv)             # show that we've stopped
+                    break
+                forwards=movesteps > 0 if isgoto else targetdirget()>0
+                dirset = 'F' if forwards else 'R'
+                tickv=tickget()
+                utickctr=0
+                starttickv=starttickget()
+                if tickv < starttickv:
+                    rintvl=rampintvlget()
+                    nextramptick=elapsedtime + rintvl
+                    currenttick = starttickv
+                else:
+                    nextramptick=None  # none means no ramping
+                    currenttick = tickv
+                self.log(loglvls.DEBUG, '%s starts currenttick %5.4f, scaled to: %6.5f, ramptick %s' % (
+                            self.name, currenttick, currenttick/uslevelv, ('none' if nextramptick is None else '%5.4f' %rintvl)))
+            else:   # we're moving...
+                newfwd=movesteps > 0 if isgoto else targetdirget()>0
+                                # slow down if new command pending or direction needs to change or goto reaching target or just going to fast
+                targettickv=max(tickget(), mintickget())
+                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()):
+                    starttickv=starttickget()
+                    if currenttick >= starttickv: # now go to stopped
+                        self.log(loglvls.DEBUG,'slowing -> stopped')
+                        currenttick=None
+                    elif nextramptick is None:
+                        self.log(loglvls.DEBUG, 'set nextramptick')
+                        nextramptick = elapsedtime+rampintvlget()
+                    elif elapsedtime < nextramptick:
+                        pass
+                    else:
+                        currenttick += (currenttick-fastesttickv*.95)*rampfactget()
+                        if currenttick > starttickv:       # have we passed slowest speed?
+                            currenttick = starttickv
+                            nextramptick=None
+                        else:
+                            nextramptick += rampintvlget()
+                        self.log(loglvls.DEBUG, 'slowing.... %5.4f' % currenttick)
+                else:    # accelerate if we can or just keep going
+                         # how fast do we want to go? - clamp requested to max in this mode
+                    if currenttick > targettickv: # speeding up
+                        if nextramptick is None or elapsedtime > nextramptick:   # time for a change?
+                            currenttick -= (currenttick-targettickv*.95)*rampfactget()
+                            if currenttick < targettickv:       # too fast?
+                                currenttick = targettickv
+                                nextramptick=None
+                                self.ramputicks.setValue(utickctr, wv.myagents.app)
+                            else:
+                                if nextramptick is None:
+                                    nextramptick = elapsedtime+rampintvlget()
+                                else:
+                                    nextramptick += rampintvlget()
+                    else:
+                        nextramptick=None
+            currentposv += usteps if forwards else -usteps
+            utickctr += usteps
+            yv=.1 if currenttick is None else currenttick/uslevelv
+            elapsedtime += yv
+            yield (dirset, yv, currentposv)
+
+class stepcontrols(stepgen):
+    """
+    This class implements the details of step timing with parameters to control the various speeds and
+    ramping up and down.
+    
+    Use of a separate class allows multiple different sets of timings to be used, as well as different
+    methods for generating the timings.
+    
+    It provides a generator that yields a sequence of step intervals. If no step is required it returns
+    None.
+    
+    This class ramps up and down by varying the interval by a constant factor at regular intervals.
+    """
+    def __init__(self, **kwargs):
+        wables=[
+            ('minstep',         wv.floatWatch,      .0017,      False),     # minimum step interval (-> fastest speed)
+            ('startstep',       wv.floatWatch,      .006,       False),     # initial interval when starting
+            ('rampfact',        wv.floatWatch,      1.1,        False),     # change in interval applied each ramptick when ramping
+            ('rampintvl',       wv.floatWatch,      .05,        False),     # interval between speed changes in ramp mode
+            ('rampticks',       wv.intWatch,        7700,       False),     # number of ticks to stop from max slow speed
+            ('ramputicks',      wv.intWatch,        0,          False),     # actual ticks used to ramp up / down
+        ]
+        super().__init__(wabledefs=wables, **kwargs)
+
+    def tickgen(self):
+        """
+        generator function for step times.
+        
+        yields a sequence of 3-tuples until target is reached, at which point it returns None for the time interval.
+        This function keeps it's own time so can generate ticks independent of actual time - the caller must sync
+        to a clock if required.
+        
+        each tuple is:
+            0 : None if direction pin is unchanged, else the new value for the direction pin
+            1 : time in seconds to the next step pin trigger - None if no step required (e.g. at target pos)
+            2 : raw position after this step is issued
+        """
+        isgoto=self.motor.opmode.getValue()=='going'
+                        # set up functions to directly access the various info needed - dynamic fetch allows update on the fly
+        if isgoto:
+            targetposget= self.motor.targetrawpos.getValue      # target position when in goto mode
+        else:
+            targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
+        uslevelget  = self.motor.usteplevel.getValue        # current microstep level
+        starttickget= self.startstep.getValue               # minimum time for a first tick
+        mintickget=self.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
+        tickget=self.motor.ticktime.getValue                # current target tick time - 0 gives max speed in this mode (clamped to 'minslow')
+        ramptget=self.rampticks.getValue                    # number of ticks needed to slow down from max speed (takes too long to calculate on the fly)
+        rampintvlget=self.rampintvl.getValue
+        rampfactget=self.rampfact.getValue
+        currentposv=self.motor.rawposn.getValue()           # get the current position - we assume we are in control of this so don't re-read it
+        utickctr=0
+        currenttick=None                                    # set stationary
+        elapsedtime=0.0
+        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelget()))
+        while True:
+            dirset=None
+            uslevelv=uslevelget()
+            usteps=self.motor.maxstepfactor // uslevelv
+            if isgoto:
+                movesteps=targetposget()-currentposv
+                if abs(movesteps) < usteps:                     # if less than the current step size stop now before we start
+                    self.log(loglvls.DEBUG, 'at target pos')
+                    yield (None, None, currentposv)
+                    currenttick=None 
+            else:
+                movesteps=None
+            if currenttick is None:                             # been stopped - what to do?
+                if self.motor.pending:
+                    yield (None, None, currentposv)             # show that we've stopped
+                    break
+                forwards=movesteps > 0 if isgoto else targetdirget()>0
+                dirset = 'F' if forwards else 'R'
+                tickv=tickget()
+                utickctr=0
+                starttickv=starttickget()
+                if tickv < starttickv:
+                    rintvl=rampintvlget()
+                    nextramptick=elapsedtime + rintvl
+                    currenttick = starttickv
+                else:
+                    nextramptick=None  # none means no ramping
+                    currenttick = tickv
+                self.log(loglvls.DEBUG, '%s starts currenttick %5.4f, scaled to: %6.5f, ramptick %s' % (
+                            self.name, currenttick, currenttick/uslevelv, ('none' if nextramptick is None else '%5.4f' %rintvl)))
+            else:   # we're moving...
+                newfwd=movesteps > 0 if isgoto else targetdirget()>0
+                                # slow down if new command pending or direction needs to change or goto reaching target or just going to fast
+                targettickv=max(tickget(), mintickget())
+                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()):
+                    if self.motor.pending:
+                        print('pending -> slowdown')
+                    if forwards != newfwd:
+                        print('change dir => slowdown')
+                    if currenttick < targettickv:
+                        print('near target => slowdown')
+#                    if isgoto:
+#                        closing=abs(movesteps) < ramptget()
+#                        print('close?', closing, movesteps, ramptget())
+                    starttickv=starttickget()
+                    if currenttick >= starttickv: # at min speed - why are we here?
+                        if isgoto and abs(movesteps) < ramptget():
+                            pass # just carry on till we reach target
+                        else:
+                            self.log(loglvls.DEBUG,'slowing -> stopped')
+                            currenttick=None
+                    elif nextramptick is None:
+                        self.log(loglvls.DEBUG, 'set nextramptick')
+                        nextramptick = elapsedtime+rampintvlget()
+                    elif elapsedtime < nextramptick:
+                        pass
+                    else:
+                        currenttick+=currenttick*rampfactget() # slow down a bit
+                        if currenttick > starttickv:       # have we passed slowest speed?
+                            currenttick = starttickv
+                            nextramptick=None
+                        else:
+                            nextramptick += rampintvlget()
+                        self.log(loglvls.DEBUG, 'slowing.... %5.4f' % currenttick)
+                else:    # accelerate if we can or just keep going
+                         # how fast do we want to go? - clamp requested to max in this mode
+                    if currenttick > targettickv: # speeding up
+                        if nextramptick is None or elapsedtime > nextramptick:   # time for a change?
+                            currenttick -= currenttick*rampfactget() # speed up a bit
+                            if currenttick < targettickv:       # too fast?
+                                currenttick = targettickv
+                                nextramptick=None
+                                self.ramputicks.setValue(utickctr, wv.myagents.app)
+                            else:
+                                if nextramptick is None:
+                                    nextramptick = elapsedtime+rampintvlget()
+                                else:
+                                    nextramptick += rampintvlget()
+                    else:
+                        nextramptick=None
+            currentposv += usteps if forwards else -usteps
+            utickctr += usteps
+            yv=.1 if currenttick is None else currenttick/uslevelv
+            elapsedtime += yv
+            yield (dirset, yv, currentposv)
+
 class stepper(wv.watchablepigpio):
     """
     Drives a single stepper motor with 2 different styles of driving. Uses an A4988 style stepper controller.
@@ -230,16 +534,53 @@ class stepper(wv.watchablepigpio):
         
         fast stepping using dma control blocks to provide very accurate timing with ramp up and down
         capability
-        
-    The class runs the motor control in its own thread, some commands are passed to that thread to process
+
+    The motor accepts a small number of commands:
+    --------------------------------------------- 
+       
+    close:  close the motor down - it cannot be used again once closed
     
-    rawposn is an integer representation of the position in microsteps at the highest microstep level
+    stop:   stop the motor - if it is running in will stop in a controlled manner (i.e. it will decelerate to s
+    
+    goto:   the motor will travel to the target position in the op mode in 'nextopmode'
+    
+    run:    the motor will run at the target speed until stop is requested
+
+    The motor can be in 1 of a number of (operation) modes. These are set by the motor and show the current state.
+    -------------------------------------------------------
+    
+    closed: Motor has shut down and cannot be used - the motor can only be run again by re-creating the object
+    
+    stopped:The motor is not currently active.
+    
+    going:  The motor is moving to the target location - it will accelerate to the max applicable speed
+            and decelerate to the location
+    
+    moving: The motor is running at the target speed - this will use accelerate and decelerate as appropriate
+    
+    stepmodes provide detailed control of initial speed, maximum speed, acceleration, deceleration (and how they are
+    actioned) as well as whether the stepping will by directly from software or using DMA controlled stepping.
+    
+    The class runs the motor control in its own thread, commands are passed to that thread to process
+    
+    rawposn is an integer representation of the position in microsteps at the highest microstep level.
     """
-    def __init__(self, stepcontroller, name, **kwargs):
+
+    opmodes= ('closed', 'stopped', 'going', 'moving')
+
+    commands=('none', 'close', 'stop', 'goto', 'run')
+
+    def __init__(self, name, app, value, wabledefs=[], **kwargs):
         """
         sets up a stepper motor driver for an A4988 style chip.
         
-        name    : used in log messages.
+        name    : used in log messages, and to identify motor in wave processing
+        
+        app     : multi motor controller
+        
+        value   : dict with saved values for watchables
+        
+        wabledefs: extra watchables to be included in the object 
         
         settings must be included in kwargs to define pins and fixed values and limits for the motor.
         see the example file 'motor.cfg'
@@ -249,12 +590,22 @@ class stepper(wv.watchablepigpio):
         self.name=name
         self.mthread=None
         self.cmndq=queue.Queue()
+        self.respq=queue.Queue()
         self.overrunctr=0
         self.overruntime=0.0
         self.tlogs={}
+        modewables=[]
+        rmodes=[]
+        for smode, svals in value['stepmodes'].items():         # find the stepmodes declared in values (originally from json file) and make fields defs
+            modewables.append((smode,   app.classdefs[svals['stepclass']], None, False, {'name': smode, 'motor': self}))
+            rmodes.append(smode)
+        self.stepmodenames=rmodes
         wables=[
-            ('mode',        wv.enumWatch,   modevals[1],        False,  {'vlist': modevals}),   # what mode is current
-            ('start_mode',  wv.enumWatch,   modevals[1],        True,   {'vlist': modevals}),   # mode to start in
+            ('userstepm',   wv.enumWatch,   rmodes[0],          False,  {'vlist': rmodes}),         # user step def for goto and run
+            ('targetrawpos',wv.intWatch,    0,                  False),                             # target position when in goto mode
+            ('target_dir',  wv.intWatch,    1,                  False),                             # target direction when in run mode - +ve for fwd, -ve for reverse
+            ('opmode',      wv.enumWatch,   self.opmodes[1],    False,  {'vlist': self.opmodes}),   # what mode is current - set by the motor
+            ('stepstyle',   wv.enumWatch,   'off',              False,  {'vlist': ('off', 'soft', 'dma')}), # shows if motor is stepping and if so which type
             ('drive_enable',gpio_out_pin,   None,               False,  {'name': 'drive enable', 'loglevel': wv.loglvls.DEBUG}),  # sets up drive enable pin
             ('direction',   gpio_out_pin,   None,               False,  {'name': 'direction'}),     # sets up direction pin
             ('step',        gpio_trigger_pin,None,              False,  {'name': 'step'}),          # sets up step pin
@@ -262,22 +613,16 @@ class stepper(wv.watchablepigpio):
             ('usteplevel',  usteplevel_pinset,None,             False),     # sets up the pins used to control microstep level
             ('rawposn',     wv.intWatch,    0,                  False),     # current position in microsteps (not totally up to date while fast stepping)
             ('ticktime',    wv.floatWatch,  0,                  False),     # minimum step interval (clamped to minslow for slow stepping)
-            ('targetrawpos',wv.intWatch,    0,                  False),     # target position when in goto mode
-            ('runmode',     wv.enumWatch,   'none',             False,  {'vlist': ('none', 'slowgoto', 'slowtrack', 'fastgoto')}), # mode to use for next movement
-            ('fast',        stepcontroller, None,               False,  {'name': 'fast'}),
-            ('slow',        stepcontroller, None,               False,  {'name': 'slow'}),
-        ]
+            ('stepmodes',   wv.watchablesmart,None,             False,  {'wabledefs': modewables}), # the available stepper control modes
+        ]+wabledefs
         self.pinsetuplist=('drive_enable','direction','step','usteplevel')
-        super().__init__(wabledefs=wables, **kwargs)
-        self.mode.addNotify(self.tracker, wv.myagents.user)
-        self.mode.addNotify(self.tracker, wv.myagents.app)
+        super().__init__(wabledefs=wables, app=app, value=value, **kwargs)
+        self.pending=None
+        self.dothis('stop')
         self.mthread=threading.Thread(name='stepper'+self.name, target=self._thrunner)
         self.log(loglvls.INFO,'starting motor %s thread stepper' % self.name)
         self.maxstepfactor = self.usteplevel.maxusteps()
         self.mthread.start()
-
-    def tracker(self, oldValue, newValue, agent, watched):
-        print('oldvalue: %s, newvalue: %s, by agent %s' %(oldValue, newValue, agent))
 
     def crashstop(self):
         """
@@ -285,45 +630,62 @@ class stepper(wv.watchablepigpio):
         """
         self.drive_enable.setValue('disable',wv.myagents.app)
         self.mode.setValue('closed',wv.myagents.user)
-
+        
     def cleanstop(self):
-        """
-        requests the driver thread to come to a clean stop and end the thread
-        
-        returns when thread has finished
-        """
-        self.mode.setValue('closed',wv.myagents.user)
-        while self.mthread.is_alive():
-            time.sleep(.3)
-        self.log(loglvls.INFO,'motor %s thread stepper finished' % self.name)
+        self.dothis(command='close')
 
-    def setValue(self, **kwargs):
-        """
-        redefines the standard setValue to instead pass the request to the motor thread
-        and make the changes in thread. This also means the motor responds quickly to mode changes.
-        
-        This expects:
-            value: a dict of watchable name -> value
-            agent: the agent making the change
-        """
-        self.cmndq.put_nowait((self._thsetValue, kwargs))
+    def dothis(self, command, targetpos=None, targetdir=None, stepmode=None):
+        assert command in self.commands
+        if command is ('goto', 'run'):
+            assert self.opmode.getValue() == 'stopped'
+            assert stepmode in self.userstepm.vlist
+            if command == 'run':
+                assert targetdir in ('fwd','rev')
+            if command == 'goto':
+                assert isinstance(targetpos, (int,float))
+        if command != 'none':
+            print('putting', command)
+            self.cmndq.put_nowait((self._command, {'command': command, 'targetpos': targetpos, 'targetdir': targetdir, 'stepmode': stepmode}))
+            if command in ('goto', 'run'):
+                mo = getattr(self.stepmodes,stepmode).mode
+                print('command %s return mode %s' % (command, mo))
+                return mo
+            else:
+                print('command %s return nothing' % command)            
+        return None
+
+    def _command(self, command, targetpos, targetdir, stepmode):
+        print('setting pending======================', command)
+        self.pending={'command': command, 'targetpos': targetpos, 'targetdir': targetdir, 'stepmode': stepmode}
 
     def _thrunner(self):
         self.log(loglvls.INFO,'%s motor thread running', self.name)
-        curmode=self.mode.getIndex()
+        self.opmode.setIndex(1, wv.myagents.app)
+        self.stepstyle.setIndex(0, wv.myagents.app)
         abs_start=time.time()
         abs_thread=time.thread_time()
         abs_process=time.process_time()
-        while curmode != 0:  # mode zero means time to exit thread
-            if curmode==1:      # motor is stopped - drop power after 'holdstopped'
+        while self.opmode.getIndex() != 0:  # mode zero means time to exit thread
+            cmd='stop' if self.pending is None else self.pending['command']
+            if cmd=='close':
+                self.opmode.setIndex(0, wv.myagents.app)
+            elif cmd=='stop':
+                self.pending=None
                 self._thrun_stopped()
-            elif curmode==2 or curmode==3:    # slowgoto - software stepping until target reached, then stop
-                self._slowrun()
-            elif curmode==4:                  # fast goto mode - ticks generated here, control is in motorset controller
-                self._thrun_faststep()
             else:
-                self.log(loglvls.ERROR,'%s unknown motor mode %s (%d)' % (self.name, self.mode.getValue(), self.mode.getIndex()))
-            curmode=self.mode.getIndex()
+                print('_________________', self.pending)
+                stepsettings=getattr(self.stepmodes,self.pending['stepmode'])
+                self.opmode.setValue('going' if cmd=='goto' else 'moving', wv.myagents.app)
+                comdetails=self.pending
+                self.pending=None
+                if stepsettings.mode=='wave':
+                    self._thrun_faststep()
+                elif stepsettings.mode=='software':
+                    self.stepstyle.setValue('soft', wv.myagents.app)
+                    self._slowrun(stepsettings, command=comdetails['command'], targetpos=comdetails['targetpos'], targetdir=comdetails['targetdir'])
+                else:
+                    self.log(loglvls.ERROR,'%s unknown motor mode %s' % (self.name, stepsettings.mode))
+                self.opmode.setValue('stopped', wv.myagents.app)
         self._thcloseIO()
         self.log(loglvls.INFO,'%s exiting motor thread. Execution summary: elapsed: %7.2f, process: %7.2f, thread: %7.2f' % (self.name,
                     time.time()-abs_start, time.process_time()-abs_process, time.thread_time()-abs_thread))
@@ -338,7 +700,7 @@ class stepper(wv.watchablepigpio):
         if nothing arrived on the q it returns True
         
         if anything returned on the q and has been processed it returns False (to signify the target time has not been reached, but
-        something has changed), this allows loops to react quickly to change settings
+        something has changed), this allows loops to react quickly to changed settings
         """
         if delay is None:
             delay=waittill-time.time()
@@ -353,15 +715,9 @@ class stepper(wv.watchablepigpio):
             method=None
         if method is None:
             return True
+        print(kwargs)
         method(**kwargs)
         return False
-
-    def _thsetValue(self, value, agent):
-        if agent in self.app.agentclass:
-            for n, v in value.items():
-                getattr(self, n).setValue(v, agent)
-        else:
-            self.log(loglvls.FATAL, 'agent {} not known in setting var {} for {}'.format(agent, n, self.name)) 
 
     def _thrun_stopped(self):
         """
@@ -376,7 +732,7 @@ class stepper(wv.watchablepigpio):
         else:
             holdtimeout=time.time() + self.holdstopped.getValue()
         self.log(loglvls.INFO, "%s entering mode 'stopped'" %self.name)
-        while self.mode.getIndex() == 1:
+        while self.pending==None:
             if holdtimeout:
                 self._thwaitq(waittill=holdtimeout)
             else:
@@ -391,123 +747,11 @@ class stepper(wv.watchablepigpio):
         with runfast, the real work is done in the motorset class, so this just idles until the mode changes again
         """
         self.log(loglvls.INFO, "%s entering mode 'faststep'" % self.name)
-        while self.mode.getIndex() == 4:
+        while self.pending==None:
             self._thwaitq(delay=1)
         self.log(loglvls.INFO, "%s leaving mode 'faststep'" % self.name)
 
-    def tickgen(self):
-        """
-        generator function for step times
-        
-        yields a sequence of 3-tuples until target is reached, at which point it returns None for the time interval
-        
-        each tuple is:
-            0 : None if direction pin is unchanged, else the new value for the direction pin
-            1 : time in seconds to the next step pin trigger - None if no step required (e.g. at target pos)
-            2 : raw position after this step is issued
-        """
-        targetposget= self.targetrawpos.getValue            # set up functions to directly access the various info needed - dynamic fetch allows update on the fly
-        uslevelget  = self.usteplevel.getValue              # current microstep level
-        mode=self.mode.getIndex()
-        if mode==2 or mode ==3:
-            params=self.slow
-        else:
-            params=self.fast
-        starttickget= params.startstep.getValue               # minimum time for a first tick
-        mintickget=params.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
-        tickget=self.ticktime.getValue                      # current target tick time - 0 gives max speed in this mode (clamped to 'minslow')
-        ramptget=params.rampticks.getValue                # number of ticks needed to slow down from max speed (takes too long to calculate on the fly)
-        rampintvlget=params.rampintvl.getValue
-        rampfactget=params.rampfact.getValue
-        currentposv=self.rawposn.getValue()                 # get the current position - we assume we are in control of this so don't re-read it
-        utickctr=0
-        currenttick=None                                    # set stationary
-        elapsedtime=0.0
-        self.log(loglvls.DEBUG, '%s tickgen setup complete %d usteps per step' % (self.name, self.maxstepfactor // uslevelget()))
-        while self.tickgenactive:
-            dirset=None
-            movesteps=targetposget()-currentposv
-            uslevelv=uslevelget()
-            usteps=self.maxstepfactor // uslevelv
-            if abs(movesteps) < self.maxstepfactor // uslevelv:  # if less than the current step size stop now before we start
-                yield (None, None, currentposv)
-                currenttick=None 
-            else:
-#                self.log(loglvls.DEBUG, 'moving %d' % movesteps)
-                if currenttick is None:
-                    forwards=movesteps > 0
-                    dirset = 'F' if forwards else 'R'
-                    tickv=tickget()
-                    utickctr=0
-                    starttickv=starttickget()
-                    if tickv < starttickv:
-                        rintvl=rampintvlget()
-                        nextramptick=elapsedtime + rintvl
-                        currenttick = starttickv
-                    else:
-                        nextramptick=None  # none means no ramping
-                        currenttick = tickv
-                    self.log(loglvls.DEBUG, '% starts currenttick %5.4f, scaled to: %6.5f, ramptick %s' % (
-                                self.name, currenttick, currenttick/uslevelv, ('none' if nextramptick is None else '%5.4f' %rintvl)))
-                else:   # we're moving...
-                    if forwards == (movesteps > 0): # and we're going the right way
-                        if abs(movesteps) < ramptget():                 # check if we need to slow down
-                            targettickv=starttickget()                  # target is initial speed
-                            if currenttick < targettickv:               # are we going too fast?
-                                if nextramptick is None or elapsedtime > nextramptick:
-                                    currenttick = currenttick*rampfactget() # slow down a bit
-                                    if currenttick > targettickv:       # have we passed slowest speed?
-                                        currenttick = targettickv
-                                        nextramptick=None
-#                                        print('reached min %5.4f' % currenttick)
-                                    else:
-                                        if nextramptick is None:
-                                            nextramptick = elapsedtime+rampintvlget()
-                                        else:
-                                            nextramptick += rampintvlget()  # set time for next speed change
-#                                        print('speed to %5.4f' % currenttick)
-                            else:
-                                currenttick = targettickv               # make sure we're at target and now we go for constant speed
-                                nextramptick=None
-                        else:
-                            targettickv=max(tickget(), mintickget())     # how fast do we want to go?
-                            if targettickv < currenttick:               # -- faster
-                                if nextramptick is None or elapsedtime > nextramptick:  # time to go faster?
-                                    currenttick = currenttick / rampfactget() # speed up a bit
-                                    if currenttick < targettickv:       # too fast?
-                                        currenttick = targettickv
-                                        nextramptick=None
-                                        print('%s reached max %5.4f at tick %d' % (self.name, currenttick, utickctr))
-                                    else:
-                                        if nextramptick is None:
-                                            nextramptick = elapsedtime+rampintvlget()
-                                        else:
-                                            nextramptick += rampintvlget()
-#                                        print('speed to %5.4f' % currenttick)
-                            else:
-                                currenttick = targettickv               # make sure we're at target speed and now we go for constant speed
-                                nextramptick=None
-   
-                    else:   # direction changed - start slowing down
-                        if currenttick >= starttickget(): # now go to stopped
-                            self.log(loglvls.DEBUG,'change dir - stopped')
-                            currenttick=None
-                        elif nextramptick is None:
-                            self.log(loglvls.DEBUG, 'set nextramptick')
-                            nextramptick = elapsedtime+rampintvlget()
-                        elif elapsedtime < nextramptick:
-                            pass
-                        else:
-                            currenttick *= rampfactget()
-                            self.log(loglvls.DEBUG, 'slowing.... %5.4f' % currenttick)
-                            nextramptick += rampintvlget()
-                currentposv += usteps if forwards else -usteps
-                utickctr += usteps
-                yv=.3 if currenttick is None else currenttick/uslevelv
-                elapsedtime += yv
-                yield (dirset, yv, currentposv)
-
-    def pulsegen(self):
+    def pulsegen(self, stepdef, command, targetpos, targetdir):
         """
         a wrapper for tickgen that yields the parameters for creating a pigpio pulse plus the new absolute position after each pulse.
         
@@ -518,15 +762,25 @@ class stepper(wv.watchablepigpio):
             3: raw position of this motor after this pulse
             4: the name of this motor
         """
-        tickmaker=self.tickgen()
+        self.opmode.setValue({'goto': 'going', 'run': 'moving'}[command], wv.myagents.app)
+        self.targetrawpos.setValue(targetpos, wv.myagents.app)
+        self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
         dirvar=self.direction
+        setdir={'F':dirvar.getBits('F'),
+                'R':dirvar.getBits('R')}
         dirbit=1<<dirvar.pinno
         if dirvar.vlist.index('F') == 1:
-            setdir={'F': (dirbit,0),
+            xsetdir={'F': (dirbit,0),
                     'R': (0, dirbit)}
         else:
-            setdir={'F': (0, dirbit),
+            xsetdir={'F': (0, dirbit),
                     'R': (dirbit,0)}
+        assert xsetdir['F']==setdir['F'], 'oops %s - %s' % (xsetdir['F'], setdir['F'])
+        assert xsetdir['R']==setdir['R']
+        self.usteplevel.setValue(stepdef.usteps.getValue(), wv.myagents.app)
+        self.drive_enable.setValue('enable', wv.myagents.app)
+        self.tickgenactive=True
+        tickmaker=stepdef.tickgen()
         stepvar=self.step
         pulselen=stepvar.pulsetime
         stepa=1<<stepvar.pinno if stepvar.vlist[0] == 0 else 0
@@ -543,11 +797,12 @@ class stepper(wv.watchablepigpio):
                 break
             onbits, offbits = stepon
             if ticktime is None:
-                delay, overflow = None, 0
+                delay, overflow = (None, 0)
             else:
                 delay, overflow=divmod(ticktime*1000000+overflow,1)
             if dirchange:
                 dirbits=setdir[dirchange]
+                print('setting dir', dirchange, dirbits)
                 yield (onbits | dirbits[0], offbits | dirbits[1], usclock, newpos, self.name)
             else:
                 yield (onbits, offbits, usclock, newpos, self.name)
@@ -557,8 +812,9 @@ class stepper(wv.watchablepigpio):
                 break
             else:
                 usclock += int(delay)-pulselen
+        self.drive_enable.setValue('disable', wv.myagents.app)
 
-    def _slowrun(self):
+    def _slowrun(self, stepinf, command, targetpos, targetdir):
         """
         runs a simple loop sending trigger pulses to the chip's step pin from code.
         
@@ -566,13 +822,17 @@ class stepper(wv.watchablepigpio):
         the target position to manage ramping, it uses _thwaitq to delay for the required time, _thwaitq also
         picks up incoming commands and processes them.
         """
+        self.opmode.setValue({'goto': 'going', 'run': 'moving'}[command], wv.myagents.app)
+        self.targetrawpos.setValue(targetpos, wv.myagents.app)
+        self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
+        self.usteplevel.setValue(stepinf.usteps.getValue(), wv.myagents.app)
         self.drive_enable.setValue('enable', wv.myagents.app)
         self.log(loglvls.INFO, '%s _slowrun starts' % self.name)
         self.tickgenactive=True
         realstep=True
         self.overrunctr=0
         self.overruntime=0.0
-        tickmaker=self.tickgen()
+        tickmaker=stepinf.tickgen()
         steptrig=self.step.trigger
         directionset=self.direction.setValue
         posnset = self.rawposn.setValue
@@ -582,18 +842,22 @@ class stepper(wv.watchablepigpio):
         tickctr=0
         newpos=self.rawposn.getValue()
         stoppedtimer=None
+#        tlf=open('tlog.txt','w')
+        tstart=time.time()
         while True:
             if realstep:
                 try:
                     dirchange, ticktime, newpos = next(tickmaker)
                 except StopIteration:
+                    self.log(loglvls.DEBUG,'StopIteration!!!!!!!')
                     break
                 if dirchange:
+                    print('setting direction to', dirchange)
                     directionset(dirchange, wv.myagents.app)
                 if ticktime is None:
-                    mode=self.mode.getIndex()
-                    if mode==2:  # its a goto - exit to stopped mode
-                        self.mode.setIndex(1,wv.myagents.app)
+#                    tlf.write('skip at %7.5f\n' % (time.time()-tstart))
+                    mode=self.opmode.getIndex()
+                    if mode==2:  # its a goto - exit
                         break
                     nextsteptime += .05
                     if stoppedtimer is None:
@@ -605,19 +869,20 @@ class stepper(wv.watchablepigpio):
                             self.drive_enable.setValue('disable', wv.myagents.app)
                             stoppedtimer += 1000
                             self.log(loglvls.DEBUG, "{} has turned off drive current.".format(self.name))
+                            break
                 else:
                     if not stoppedtimer is None:
                         self.drive_enable.setValue('enable', wv.myagents.app)
                     steptrig()
+#                    tlf.write('step at %7.5f\n' % (time.time()-tstart))
                     stoppedtimer=None
                     tickctr+=1
                     nextsteptime += ticktime
                 if time.time() > posupdatetime:
                     posnset(newpos, wv.myagents.app)
                     posupdatetime += .8
-            if not self.mode.getIndex() in (2,3):
-                self.tickgenactive=False
             realstep=self._thwaitq(nextsteptime)
+#        tlf.close()
         self.log(loglvls.INFO, "%s leaving mode 'slowxxx', now at %s, %d overruns of %d ticks, total overrun: %7.3f." % (self.name, newpos, self.overrunctr, tickctr, self.overruntime))
         if not newpos is None:
              posnset(newpos, wv.myagents.app)
@@ -642,27 +907,23 @@ class stepper(wv.watchablepigpio):
         else:
            return None
 
-    def goto(self, steppos):
+    def fastgoto(self, stepmode, **kwargs):
         """
-        a handy function useful for testing a single freestanding motor
+        prepare to move or goto position
+        
+        Check if this motor mode uses waves and if so return a generator
+        The main work is done in the controller.   
         """
-        tpos=round(steppos * self.maxstepfactor)
-        self.targetrawpos.setValue(tpos, wv.myagents.app)
-        self.mode.setValue('slowstep', wv.myagents.app)
-        self.log(loglvls.INFO,'%s new target raw pos %d' % (self.name, tpos))
-
-    def fastgoto(self):
-        """
-        prepare to goto position in targetrawpos    
-        """
-        self.drive_enable.setValue('enable', wv.myagents.app)
-        self.tickgenactive=True
-        return self.pulsegen()
+        stepgen=getattr(self.stepmodes,stepmode)
+        mtype=stepgen.mode
+        if mtype=='wave':
+            return self.pulsegen(stepgen, **kwargs)
+        return None
 
 controllermodes=('closed', 'off', 'faststep')
 
 class multimotor(wv.watchablepigpio):
-    def __init__(self, motors, **kwargs):
+    def __init__(self, gpiolog=False, **kwargs):
         wables=[
             ('pigpmspw',    wv.intWatch,    0,                  False),
             ('pigpppw',     wv.intWatch,    0,                  False),
@@ -671,13 +932,18 @@ class multimotor(wv.watchablepigpio):
             ('gotonow',     wv.btnWatch,    'goto now',         False),
             ('wavepulses',  wv.intWatch,    1000,               True,   {'minv':100}),
         ]
-        super().__init__(wabledefs=wables, loglevel=loglvls.DEBUG, **kwargs)
+        if gpiolog:
+            from pigpiolog import plog
+            pio=plog()
+        else:
+            pio=None
+        super().__init__(wabledefs=wables, pigp=pio, loglevel=loglvls.DEBUG, **kwargs)
         self.pigpmspw.setValue(self.pio.wave_get_max_micros(), wv.myagents.app)
         self.pigpppw.setValue(self.pio.wave_get_max_pulses(), wv.myagents.app)
         self.pigpbpw.setValue(self.pio.wave_get_max_cbs(), wv.myagents.app)
         self.motors={}
-        for motname, motclass in motors:
-            newmotor=self.makeChild(defn=(motname, motclass, None, False, {'name': motname}), value=self.startsettings.get(motname,{}))
+        for motname, motinfo in self.startsettings.items():
+            newmotor=self.makeChild(defn=(motname, self.classdefs[motinfo['motorclass']], None, False, {'name': motname, 'loglevel': wv.loglvls.DEBUG}), value=self.startsettings.get(motname,{}))
             if newmotor is None:
                 raise ValueError('motor construction failed for %s' % motname)
             self.motors[motname]=newmotor
@@ -693,6 +959,9 @@ class multimotor(wv.watchablepigpio):
             motor.cleanstop()
         self.mode.setValue('closed', wv.myagents.app)
 
+    def runfast(self, motorlist):
+        self.cmndq.put((self._threadfaststep, {'motorlist': motorlist}))
+
     def _thrunner(self):
         self.log(loglvls.INFO,'multimotor control thread running' )
         abs_start=time.time()
@@ -700,12 +969,7 @@ class multimotor(wv.watchablepigpio):
         abs_process=time.process_time()
         curmode=self.mode.getValue()
         while curmode != 'closed':
-            modefunc=getattr(self, '_thrun_'+curmode, None)
-            if callable(modefunc):
-                modefunc()
-            else:
-                self.log(loglvls.FATAL,'unable to find mode method for %s (%s)' % (curmode, '_thrun_'+curmode))
-                break
+            self._thwaitq(time.time()+3)
             curmode=self.mode.getValue()
         self.log(loglvls.INFO,'exiting control thread. Execution summary: elapsed: %7.2f, process: %7.2f, thread: %7.2f' % (
                     time.time()-abs_start, time.process_time()-abs_process, time.thread_time()-abs_thread))
@@ -733,19 +997,7 @@ class multimotor(wv.watchablepigpio):
         method(**kwargs)
         return delay <= 0
 
-    def _thrun_off(self):
-        """
-        this function runs in the control thread while the mode is 'off'. It just waits for the mode to change.
-        
-        It is called when the thread first runs (because the mode will be 'off') and called subsequently
-        whenever the mode changes to 'off'
-        """
-        self.log(loglvls.INFO, "entering mode 'off'")
-        while self.mode.getValue() == 'off':
-            self._thwaitq(time.time()+4.5)
-        self.log(loglvls.INFO, "leaving mode 'off'")
-
-    def _thrun_faststep(self):
+    def _threadfaststep(self, motorlist):
         """
         fast step request - get the motors involved and .....
         motorposns: a dict with a key for each motor to use, and the value is the target position for that motor
@@ -753,15 +1005,14 @@ class multimotor(wv.watchablepigpio):
         self.log(loglvls.INFO, "starting mode 'fast")
         timestart=time.time()
         mgens=[]
-        motors=[]
-        for mname, motor in self.motors.items():
-            if motor.runmode.getIndex()==3:
-                tgen=motor.fastgoto()
-                if not tgen is None:
-                    mgens.append((mname, tgen))
-                    motor.mode.setIndex(4, wv.myagents.app)
-                    motor.drive_enable.setValue('enable', wv.myagents.app)
-                    motors.append(motor)
+        motors={}
+        for motor, moveparams in motorlist:
+            tgen=motor.fastgoto(**moveparams)
+            if not tgen is None:
+                mgens.append((motor.name, tgen))
+                motor.opmode.setValue({'goto': 'going', 'run': 'moving'}[moveparams['command']], wv.myagents.app)
+                motors[motor.name]=motor
+
         mstime=0
         if len(mgens) > 0:
             mergegen=self.pulsemerge(mgens)
@@ -836,15 +1087,16 @@ class multimotor(wv.watchablepigpio):
                     for mn, mp in endposns.items():
                         self.motors[mn].rawposn.setValue(mp, wv.myagents.app)
                 elif current ==pendingbufs[0]:
-                    self.log(loglvls.DEBUG,'wave %d running' % current)
+                    pass
+#                    self.log(loglvls.DEBUG,'wave %d running' % current)
                 else:
                     self.log(loglvls.DEBUG,'BBBBBBBBBBBBBBBBBBBBBBBBBBAArg')
 #            self.pigp.wave_clear()
             if not logf is None:
                 logf.close()
         self.log(loglvls.INFO, "leaving mode 'fast")
-        for motor in motors:
-            motor.mode.setIndex(1, wv.myagents.app)
+        for motor in motors.values():
+            motor.opmode.setIndex(1, wv.myagents.app)
         self.mode.setValue('off', wv.myagents.app)
 #            self.log(logging.INFO, self.reporttimelog('fastrun'))
 
@@ -899,20 +1151,3 @@ class multimotor(wv.watchablepigpio):
                             mpulses[nx] = next(newgens[nx][1])
                         except StopIteration:
                             mpulses[nx] = None
-
-#pinsm1={
-#    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
-#}
-
-#pinsm2={
-#    'ticksperunit'  : 144*120*48/360,  # 144 is worm drive ratio, 128 is gearbox ratio, 48 steps per rev on stepper motor - unit is 1 degree
-#}
-
-#m1params={
-#    '12V':    {'minslow': .0027, 'usteplevel':2},
-#    'ra24V':  {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
-#    'dec24V': {'minslow': .0020, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.001, 'ticktime': 0},
-#    'ra24vfast': {'minslow': .0010, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
-#    'dec24Vfast': {'minslow': .0011, 'usteplevel':2, 'startslow': .003,'rampintvl':.001, 'rampfact': 1.0005, 'ticktime': 0},
-#}
-# note 24v values work with both motors running in slow mode

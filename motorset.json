@@ -1,5 +1,6 @@
 {
     "m1": {
+        "motorclass": "A4988",
         "drive_enable": {
             "pinno": 25,
             "value": "disable",
@@ -55,22 +56,38 @@
                 ]
             }
         },
-        "fast": {
-            "minstep": 0.00115,
-            "startstep": 0.005,
-            "rampfact": 1.08,
-            "rampintvl": 0.1,
-            "rampticks": 13000
-        },
-        "slow": {
-            "minstep": 0.03,
-            "startstep": 0.08,
-            "rampfact": 1.2,
-            "rampintvl": 0.1,
-            "rampticks": 600
+        "stepmodes": {
+            "fast": {
+                "stepclass": "stepramp1",
+                "minstep": 0.0012,
+                "startstep": 0.005,
+                "rampfact": 0.003,
+                "rampintvl": 0.03,
+                "rampticks": 100000,
+                "mode":"wave"
+            },
+            "slow": {
+                "stepclass": "stepramp1",
+                "minstep": 0.004,
+                "startstep": 0.008,
+                "rampfact": 0.05,
+                "rampintvl": 0.05,
+                "rampticks": 800,
+                "mode": "software"
+            },
+            "smartfast": {
+                "stepclass": "stepramp1",
+                "minstep": 0.0012,
+                "startstep": 0.004,
+                "rampfact": 0.01,
+                "rampintvl": 0.02,
+                "rampticks": 75000,
+                "mode":"wave"
+            }
         }
     },
     "m2": {
+        "motorclass": "A4988",
         "drive_enable": {
             "pinno": 21,
             "value": "disable",
@@ -126,19 +143,25 @@
                 ]
             }
         },
-        "fast": {
-            "minstep": 0.00105,
-            "startstep": 0.005,
-            "rampfact": 1.05,
-            "rampintvl": 0.07,
-            "rampticks": 14000
-        },
-        "slow": {
-            "minstep": 0.005,
-            "startstep": 0.03,
-            "rampfact": 1.2,
-            "rampintvl": 0.1,
-            "rampticks": 600
+        "stepmodes": {
+            "fast": {
+                "minstep": 0.00105,
+                "startstep": 0.005,
+                "rampfact": 0.03,
+                "rampintvl": 0.07,
+                "rampticks": 14000,
+                "mode":"wave",
+                "stepclass": "stepramp1"
+            },
+            "slow": {
+                "minstep": 0.02,
+                "startstep": 0.05,
+                "rampfact": 0.05,
+                "rampintvl": 0.1,
+                "rampticks": 600,
+                "mode":"software",
+                "stepclass": "stepramp1"
+            }
         }
     }
 }

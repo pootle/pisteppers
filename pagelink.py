@@ -213,6 +213,7 @@ class wwlink():
             try:
                 self.wable.setValue(webval[0], self.pagelist.userupdate)
             except ValueError:
+                self.log(wv.loglvls.DEBUG,'setValue for %s failed ValueError using %s (%s)' % (type(self).__name__, webval[0], type(webval[0]).__name__))
                 return {'OK': False, 'fail': 'invalid value for this field (%s)' % webval[0]}
             return {'OK': True, 'value': self.webvalue}
         else:
