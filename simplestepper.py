@@ -118,7 +118,8 @@ class gpio_out_pin(wv.enumWatch):
         With default value, it returns the current value bit patterns, if the value is provided it returns the bits
         for that value.
         
-        Once a wave cycle is complete resetValue should be called so the gpio pin and the stored value here are consistent.
+        This passes control to the wave maker, so when the wave is finished resetValue should be called so the gpio
+        pin and the stored value here are consistent.
         """
         if value is None:
             value=super().getValue()
@@ -299,7 +300,8 @@ class stepcontrolgrad(stepgen):
             targetposget= self.motor.targetrawpos.getValue      # target position when in goto mode
         else:
             targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
-        uslevelget  = self.motor.usteplevel.getValue        # current microstep level
+        uslevelv  = self.motor.usteplevel.getValue()        # current microstep level
+        usteps=self.motor.maxstepfactor // uslevelv
         starttickget= self.startstep.getValue               # minimum time for a first tick
         mintickget=self.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
         tickget=self.motor.ticktime.getValue                # current target tick time - 0 gives max speed in this mode (clamped to 'minslow')
@@ -313,8 +315,6 @@ class stepcontrolgrad(stepgen):
         self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelget()))
         while True:
             dirset=None
-            uslevelv=uslevelget()
-            usteps=self.motor.maxstepfactor // uslevelv
             if isgoto:
                 movesteps=targetposget()-currentposv
                 if abs(movesteps) < usteps:                     # if less than the current step size stop now before we start
@@ -382,7 +382,7 @@ class stepcontrolgrad(stepgen):
             utickctr += usteps
             yv=.1 if currenttick is None else currenttick/uslevelv
             elapsedtime += yv
-            yield (dirset, yv, currentposv)
+            yield dirset, yv, currentposv
 
 class stepcontrols(stepgen):
     """
@@ -420,6 +420,9 @@ class stepcontrols(stepgen):
             0 : None if direction pin is unchanged, else the new value for the direction pin
             1 : time in seconds to the next step pin trigger - None if no step required (e.g. at target pos)
             2 : raw position after this step is issued
+            3 : repeat count - 0 means no repeats
+            4 : if repeat count > 0, this is the interval to use
+            5 : ir repeat count > 0, this is the position increment per tick
         """
         isgoto=self.motor.opmode.getValue()=='going'
                         # set up functions to directly access the various info needed - dynamic fetch allows update on the fly
@@ -427,7 +430,8 @@ class stepcontrols(stepgen):
             targetposget= self.motor.targetrawpos.getValue      # target position when in goto mode
         else:
             targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
-        uslevelget  = self.motor.usteplevel.getValue        # current microstep level
+        uslevelv = self.motor.usteplevel.getValue()         # current microstep level
+        usteps=self.motor.maxstepfactor // uslevelv
         starttickget= self.startstep.getValue               # minimum time for a first tick
         mintickget=self.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
         tickget=self.motor.ticktime.getValue                # current target tick time - 0 gives max speed in this mode (clamped to 'minslow')
@@ -438,22 +442,20 @@ class stepcontrols(stepgen):
         utickctr=0
         currenttick=None                                    # set stationary
         elapsedtime=0.0
-        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelget()))
+        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelv))
         while True:
             dirset=None
-            uslevelv=uslevelget()
-            usteps=self.motor.maxstepfactor // uslevelv
             if isgoto:
                 movesteps=targetposget()-currentposv
                 if abs(movesteps) < usteps:                     # if less than the current step size stop now before we start
                     self.log(loglvls.DEBUG, 'at target pos')
-                    yield (None, None, currentposv)
+                    yield (None, None, currentposv, 0, 0, 0)
                     currenttick=None 
             else:
                 movesteps=None
             if currenttick is None:                             # been stopped - what to do?
                 if self.motor.pending:
-                    yield (None, None, currentposv)             # show that we've stopped
+                    yield (None, None, currentposv, 0, 0, 0)          # show that we've stopped
                     break
                 forwards=movesteps > 0 if isgoto else targetdirget()>0
                 dirset = 'F' if forwards else 'R'
@@ -474,15 +476,12 @@ class stepcontrols(stepgen):
                                 # slow down if new command pending or direction needs to change or goto reaching target or just going to fast
                 targettickv=max(tickget(), mintickget())
                 if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()):
-                    if self.motor.pending:
-                        print('pending -> slowdown')
-                    if forwards != newfwd:
-                        print('change dir => slowdown')
-                    if currenttick < targettickv:
-                        print('near target => slowdown')
-#                    if isgoto:
-#                        closing=abs(movesteps) < ramptget()
-#                        print('close?', closing, movesteps, ramptget())
+#                    if self.motor.pending:
+#                        print('pending -> slowdown')
+#                    if forwards != newfwd:
+#                        print('change dir => slowdown')
+#                    if currenttick < targettickv:
+#                        print('near target => slowdown')
                     starttickv=starttickget()
                     if currenttick >= starttickv: # at min speed - why are we here?
                         if isgoto and abs(movesteps) < ramptget():
@@ -513,17 +512,28 @@ class stepcontrols(stepgen):
                                 nextramptick=None
                                 self.ramputicks.setValue(utickctr, wv.myagents.app)
                             else:
+                                rampintvlv=rampintvlget()
                                 if nextramptick is None:
-                                    nextramptick = elapsedtime+rampintvlget()
+                                    nextramptick = elapsedtime+rampintvlv
                                 else:
-                                    nextramptick += rampintvlget()
+                                    nextramptick += rampintvlv
+                                tickstillchange=int(rampintvlv/currenttick)-2
+                                if tickstillchange > 0:
+                                    if tickstillchange > 20:
+                                        tickstillchange=20
+                                        currentposv += usteps if forwards else -usteps
+                                        utickctr += usteps
+                                        elapsedtime += currenttick
+                                        yield (dirset, yv, currentposv, tickstillchange, currenttick, usteps)
+#                                print('pot repeat', tickstillchange)
                     else:
+#                        print('pot const repeat', 255)
                         nextramptick=None
             currentposv += usteps if forwards else -usteps
             utickctr += usteps
             yv=.1 if currenttick is None else currenttick/uslevelv
             elapsedtime += yv
-            yield (dirset, yv, currentposv)
+            yield (dirset, yv, currentposv, 0, 0, 0)
 
 class stepper(wv.watchablepigpio):
     """
@@ -778,36 +788,50 @@ class stepper(wv.watchablepigpio):
         assert xsetdir['F']==setdir['F'], 'oops %s - %s' % (xsetdir['F'], setdir['F'])
         assert xsetdir['R']==setdir['R']
         self.usteplevel.setValue(stepdef.usteps.getValue(), wv.myagents.app)
-        self.drive_enable.setValue('enable', wv.myagents.app)
+#        self.drive_enable.setValue('enable', wv.myagents.app)
         self.tickgenactive=True
         tickmaker=stepdef.tickgen()
         stepvar=self.step
         pulselen=stepvar.pulsetime
         stepa=1<<stepvar.pinno if stepvar.vlist[0] == 0 else 0
         stepb=1<<stepvar.pinno if stepa is 0 else 0
-        stepon=(stepa, stepb)
-        stepoff=(stepb,stepa)
+        onbits, offbits = stepa, stepb
         dirmask=1<<dirvar.pinno
         usclock=0
         overflow=0.0
+        pulseoff=[offbits, onbits, 0, 0, self.name]
+        pulseon=[onbits, offbits, 0, 0, self.name]
+        repeat=0
+        startup=True
         while True:
-            try:
-                dirchange, ticktime, newpos = next(tickmaker)
-            except StopIteration:
-                break
-            onbits, offbits = stepon
+            if repeat > 0:
+                repeat -=1
+                newpos += poschange
+            else:
+                try:
+                    dirchange, ticktime, newpos, repeat, tickintvl, poschange = next(tickmaker)
+                except StopIteration:
+                    break
             if ticktime is None:
                 delay, overflow = (None, 0)
             else:
                 delay, overflow=divmod(ticktime*1000000+overflow,1)
             if dirchange:
                 dirbits=setdir[dirchange]
+                if startup:
+                    driveenbits=self.drive_enable.getBits('enable')
+                    dirbits = (dirbits[0] | driveenbits[0], dirbits[1] | driveenbits[1])
+                    startup=False
                 print('setting dir', dirchange, dirbits)
                 yield (onbits | dirbits[0], offbits | dirbits[1], usclock, newpos, self.name)
             else:
-                yield (onbits, offbits, usclock, newpos, self.name)
+                pulseon[2]=usclock
+                pulseon[3]=newpos
+                yield pulseon
             usclock += pulselen
-            yield (offbits, onbits, usclock, newpos, self.name)
+            pulseoff[2]=usclock
+            pulseoff[3]=newpos
+            yield pulseoff
             if delay is None:
                 break
             else:
@@ -923,7 +947,7 @@ class stepper(wv.watchablepigpio):
 controllermodes=('closed', 'off', 'faststep')
 
 class multimotor(wv.watchablepigpio):
-    def __init__(self, gpiolog=False, **kwargs):
+    def __init__(self, gpiolog=False, loglvl=loglvls.INFO, **kwargs):
         wables=[
             ('pigpmspw',    wv.intWatch,    0,                  False),
             ('pigpppw',     wv.intWatch,    0,                  False),
@@ -937,7 +961,7 @@ class multimotor(wv.watchablepigpio):
             pio=plog()
         else:
             pio=None
-        super().__init__(wabledefs=wables, pigp=pio, loglevel=loglvls.DEBUG, **kwargs)
+        super().__init__(wabledefs=wables, pigp=pio, loglevel=loglvl, **kwargs)
         self.pigpmspw.setValue(self.pio.wave_get_max_micros(), wv.myagents.app)
         self.pigpppw.setValue(self.pio.wave_get_max_pulses(), wv.myagents.app)
         self.pigpbpw.setValue(self.pio.wave_get_max_cbs(), wv.myagents.app)
@@ -955,6 +979,8 @@ class multimotor(wv.watchablepigpio):
         self.cleanstop()
 
     def cleanstop(self):
+        for th in threading.enumerate():
+            print('thread' + th.name)
         for motor in self.motors.values():
             motor.cleanstop()
         self.mode.setValue('closed', wv.myagents.app)
@@ -971,7 +997,7 @@ class multimotor(wv.watchablepigpio):
         while curmode != 'closed':
             self._thwaitq(time.time()+3)
             curmode=self.mode.getValue()
-        self.log(loglvls.INFO,'exiting control thread. Execution summary: elapsed: %7.2f, process: %7.2f, thread: %7.2f' % (
+        self.log(loglvls.INFO,'exiting control. Summary: elapsed: %7.2f, process: %7.2f, thread: %7.2f' % (
                     time.time()-abs_start, time.process_time()-abs_process, time.thread_time()-abs_thread))
 
     def _thwaitq(self, waittill):
@@ -1025,11 +1051,15 @@ class multimotor(wv.watchablepigpio):
             moredata=True
             pendingbufs=[]
             buffends=[]
-            logf=open('tlog.txt','w')
+#            logf=open('tlog.txt','w')
+            logf=None
+#            buffstartdelay=0
             while moredata:
                 while len(pendingbufs) < 3 and moredata:
                     nextbuff=[]
                     mposns={}
+                    #if buffstartdelay > 0:
+                    #    nextbuff.append(pigpio.pulse(0, 0, buffstartdelay))
                     while len(nextbuff) < self.wavepulses.getValue():
                         try:
                             nextp=next(mergegen)
@@ -1053,6 +1083,7 @@ class multimotor(wv.watchablepigpio):
                         buffends.append(mposns)
                         self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, len(nextbuff), self.pio.wave_get_cbs()))
                         self.pio.wave_send_using_mode(waveid, pigpio.WAVE_MODE_ONE_SHOT_SYNC)
+ #                       buffstartdelay=dtime   # remember the last pulse delay to put on front of next pulse sequence
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None
@@ -1112,16 +1143,45 @@ class multimotor(wv.watchablepigpio):
                 newgens.append(gen)
             except StopIteration:
                 pass
-        while True:
-            if len(mpulses) == 0:
-                break
-            elif len(mpulses) == 1:
+        if len(mpulses) == 0:
+            pass
+        elif len(mpulses) == 1:
+            while True:
                 yield mpulses[0]
                 try:
                     mpulses[0]=next(newgens[0][1])
                 except StopIteration:
-                    mpulses=[]
-            else:
+                    break
+        elif len(mpulses)==2:
+            genA=newgens[0]
+            genB=newgens[1]
+            pulseA=mpulses[0]
+            pulseB=mpulses[1]
+            while True:
+                if pulseA is None:
+                    if pulseB is None:
+                        break
+                    else:
+                        yield pulseB
+                        try:
+                            pulseB=next(genA[1])
+                        except StopIteration:
+                            pulseB = None
+                else:
+                    if pulseB is None or pulseA[2] < pulseB[2]:
+                        yield pulseA
+                        try:
+                            pulseA = next(genA[1])
+                        except StopIteration:
+                            pulseA = None
+                    else:
+                         yield pulseB
+                         try:
+                             pulseB = next(genB[1])
+                         except StopIteration:
+                             pulseB = None
+        else:
+            while True:
                 nextix=None
                 for ix, npulse in enumerate(mpulses):
                     if not npulse is None:
