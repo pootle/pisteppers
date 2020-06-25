@@ -293,6 +293,9 @@ class stepcontrolgrad(stepgen):
             0 : None if direction pin is unchanged, else the new value for the direction pin
             1 : time in seconds to the next step pin trigger - None if no step required (e.g. at target pos)
             2 : raw position after this step is issued
+            3 : repeat count - 0 means no repeats
+            4 : if repeat count > 0, this is the interval to use
+            5 : ir repeat count > 0, this is the position increment per tick
         """
         isgoto=self.motor.opmode.getValue()=='going'
                         # set up functions to directly access the various info needed - dynamic fetch allows update on the fly
@@ -300,7 +303,7 @@ class stepcontrolgrad(stepgen):
             targetposget= self.motor.targetrawpos.getValue      # target position when in goto mode
         else:
             targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
-        uslevelv  = self.motor.usteplevel.getValue()        # current microstep level
+        uslevelv = self.motor.usteplevel.getValue()         # current microstep level
         usteps=self.motor.maxstepfactor // uslevelv
         starttickget= self.startstep.getValue               # minimum time for a first tick
         mintickget=self.minstep.getValue                    # minimum tick time once acceleration complete - fastest we can go
@@ -312,19 +315,20 @@ class stepcontrolgrad(stepgen):
         utickctr=0
         currenttick=None                                    # set stationary
         elapsedtime=0.0
-        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelget()))
+        self.log(loglvls.DEBUG, '%s !!!!!!!!!!!!! asymp tickgen setup complete %d usteps per step' % (self.name, self.motor.maxstepfactor // uslevelv))
         while True:
             dirset=None
             if isgoto:
                 movesteps=targetposget()-currentposv
                 if abs(movesteps) < usteps:                     # if less than the current step size stop now before we start
-                    yield (None, None, currentposv)
+                    self.log(loglvls.DEBUG, 'at target pos')
+                    yield (None, None, currentposv, 0, 0, 0)
                     currenttick=None 
             else:
                 movesteps=None
             if currenttick is None:                             # been stopped - what to do?
                 if self.motor.pending:
-                    yield (None, None, currentposv)             # show that we've stopped
+                    yield (None, None, currentposv, 0, 0, 0)          # show that we've stopped
                     break
                 forwards=movesteps > 0 if isgoto else targetdirget()>0
                 dirset = 'F' if forwards else 'R'
@@ -344,45 +348,74 @@ class stepcontrolgrad(stepgen):
                 newfwd=movesteps > 0 if isgoto else targetdirget()>0
                                 # slow down if new command pending or direction needs to change or goto reaching target or just going to fast
                 targettickv=max(tickget(), mintickget())
-                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()):
+                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()): # slow down?
+#                    if self.motor.pending:
+#                        print('pending -> slowdown')
+#                    if forwards != newfwd:
+#                        print('change dir => slowdown')
+#                    if currenttick < targettickv:
+#                        print('near target => slowdown')
                     starttickv=starttickget()
-                    if currenttick >= starttickv: # now go to stopped
-                        self.log(loglvls.DEBUG,'slowing -> stopped')
-                        currenttick=None
+                    if currenttick >= starttickv: # at min speed - why are we here?
+                        if isgoto and abs(movesteps) < ramptget():
+                            pass # just carry on till we reach target
+                        else:
+                            self.log(loglvls.DEBUG,'slowing -> stopped')
+                            currenttick=None
                     elif nextramptick is None:
                         self.log(loglvls.DEBUG, 'set nextramptick')
                         nextramptick = elapsedtime+rampintvlget()
                     elif elapsedtime < nextramptick:
                         pass
                     else:
-                        currenttick += (currenttick-fastesttickv*.95)*rampfactget()
+                        currenttick += (currenttick-mintickget()*.95)*rampfactget()
                         if currenttick > starttickv:       # have we passed slowest speed?
                             currenttick = starttickv
                             nextramptick=None
                         else:
-                            nextramptick += rampintvlget()
+                            rampintvlv=rampintvlget()
+                            tickstillchange=int(rampintvlv/currenttick)-2
+                            if tickstillchange > 1:
+                                multiticks = tickstillchange-1 if tickstillchange < 20 else 19
+                                currentposv += (usteps if forwards else -usteps) * multiticks
+                                utickctr += usteps * multiticks
+                                elapsedtime += currenttick * multiticks
+                                yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+                            nextramptick += rampintvlv
                         self.log(loglvls.DEBUG, 'slowing.... %5.4f' % currenttick)
-                else:    # accelerate if we can or just keep going
-                         # how fast do we want to go? - clamp requested to max in this mode
-                    if currenttick > targettickv: # speeding up
+                elif currenttick > targettickv: # speeding up?
                         if nextramptick is None or elapsedtime > nextramptick:   # time for a change?
-                            currenttick -= (currenttick-targettickv*.95)*rampfactget()
+                            currenttick -= (currenttick-mintickget()*.95)*rampfactget()
                             if currenttick < targettickv:       # too fast?
                                 currenttick = targettickv
                                 nextramptick=None
                                 self.ramputicks.setValue(utickctr, wv.myagents.app)
                             else:
+                                rampintvlv=rampintvlget()
                                 if nextramptick is None:
-                                    nextramptick = elapsedtime+rampintvlget()
+                                    nextramptick = elapsedtime+rampintvlv
                                 else:
-                                    nextramptick += rampintvlget()
-                    else:
-                        nextramptick=None
+                                    nextramptick += rampintvlv
+                                tickstillchange=int(rampintvlv/currenttick)-2
+                                if tickstillchange > 1:
+                                    multiticks = tickstillchange-1 if tickstillchange < 20 else 19
+                                    currentposv += (usteps if forwards else -usteps) * multiticks
+                                    utickctr += usteps * multiticks
+                                    elapsedtime += currenttick * multiticks
+                                    yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+
+                else: # constant speed
+                    multiticks = 25
+                    currentposv += (usteps if forwards else -usteps) * multiticks
+                    utickctr += usteps * multiticks
+                    elapsedtime += currenttick * multiticks
+                    yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+                    nextramptick=None
             currentposv += usteps if forwards else -usteps
             utickctr += usteps
             yv=.1 if currenttick is None else currenttick/uslevelv
             elapsedtime += yv
-            yield dirset, yv, currentposv
+            yield (dirset, yv, currentposv, 0, 0, 0)
 
 class stepcontrols(stepgen):
     """
@@ -475,7 +508,7 @@ class stepcontrols(stepgen):
                 newfwd=movesteps > 0 if isgoto else targetdirget()>0
                                 # slow down if new command pending or direction needs to change or goto reaching target or just going to fast
                 targettickv=max(tickget(), mintickget())
-                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()):
+                if self.motor.pending or forwards != newfwd or currenttick < targettickv or (isgoto and abs(movesteps) < ramptget()): # slow down?
 #                    if self.motor.pending:
 #                        print('pending -> slowdown')
 #                    if forwards != newfwd:
@@ -500,11 +533,17 @@ class stepcontrols(stepgen):
                             currenttick = starttickv
                             nextramptick=None
                         else:
-                            nextramptick += rampintvlget()
+                            rampintvlv=rampintvlget()
+                            tickstillchange=int(rampintvlv/currenttick)-2
+                            if tickstillchange > 1:
+                                multiticks = tickstillchange-1 if tickstillchange < 20 else 19
+                                currentposv += (usteps if forwards else -usteps) * multiticks
+                                utickctr += usteps * multiticks
+                                elapsedtime += currenttick * multiticks
+                                yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+                            nextramptick += rampintvlv
                         self.log(loglvls.DEBUG, 'slowing.... %5.4f' % currenttick)
-                else:    # accelerate if we can or just keep going
-                         # how fast do we want to go? - clamp requested to max in this mode
-                    if currenttick > targettickv: # speeding up
+                elif currenttick > targettickv: # speeding up?
                         if nextramptick is None or elapsedtime > nextramptick:   # time for a change?
                             currenttick -= currenttick*rampfactget() # speed up a bit
                             if currenttick < targettickv:       # too fast?
@@ -518,17 +557,20 @@ class stepcontrols(stepgen):
                                 else:
                                     nextramptick += rampintvlv
                                 tickstillchange=int(rampintvlv/currenttick)-2
-                                if tickstillchange > 0:
-                                    if tickstillchange > 20:
-                                        tickstillchange=20
-                                        currentposv += usteps if forwards else -usteps
-                                        utickctr += usteps
-                                        elapsedtime += currenttick
-                                        yield (dirset, yv, currentposv, tickstillchange, currenttick, usteps)
-#                                print('pot repeat', tickstillchange)
-                    else:
-#                        print('pot const repeat', 255)
-                        nextramptick=None
+                                if tickstillchange > 1:
+                                    multiticks = tickstillchange-1 if tickstillchange < 20 else 19
+                                    currentposv += (usteps if forwards else -usteps) * multiticks
+                                    utickctr += usteps * multiticks
+                                    elapsedtime += currenttick * multiticks
+                                    yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+
+                else: # constant speed
+                    multiticks = 25
+                    currentposv += (usteps if forwards else -usteps) * multiticks
+                    utickctr += usteps * multiticks
+                    elapsedtime += currenttick * multiticks
+                    yield (dirset, yv, currentposv, multiticks-1, currenttick, usteps)
+                    nextramptick=None
             currentposv += usteps if forwards else -usteps
             utickctr += usteps
             yv=.1 if currenttick is None else currenttick/uslevelv
@@ -868,13 +910,18 @@ class stepper(wv.watchablepigpio):
         stoppedtimer=None
 #        tlf=open('tlog.txt','w')
         tstart=time.time()
+        repeat=0
         while True:
             if realstep:
-                try:
-                    dirchange, ticktime, newpos = next(tickmaker)
-                except StopIteration:
-                    self.log(loglvls.DEBUG,'StopIteration!!!!!!!')
-                    break
+                if repeat > 0:
+                    repeat -=1
+                    newpos += poschange
+                else:
+                    try:
+                        dirchange, ticktime, newpos, repeat, tickintvl, poschange = next(tickmaker)
+                    except StopIteration:
+                        self.log(loglvls.DEBUG,'StopIteration!!!!!!!')
+                        break
                 if dirchange:
                     print('setting direction to', dirchange)
                     directionset(dirchange, wv.myagents.app)
@@ -1051,15 +1098,12 @@ class multimotor(wv.watchablepigpio):
             moredata=True
             pendingbufs=[]
             buffends=[]
-#            logf=open('tlog.txt','w')
-            logf=None
-#            buffstartdelay=0
+            logf=open('tnewmllog.txt','w')
+#            logf=None
             while moredata:
                 while len(pendingbufs) < 3 and moredata:
                     nextbuff=[]
                     mposns={}
-                    #if buffstartdelay > 0:
-                    #    nextbuff.append(pigpio.pulse(0, 0, buffstartdelay))
                     while len(nextbuff) < self.wavepulses.getValue():
                         try:
                             nextp=next(mergegen)
@@ -1083,7 +1127,6 @@ class multimotor(wv.watchablepigpio):
                         buffends.append(mposns)
                         self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, len(nextbuff), self.pio.wave_get_cbs()))
                         self.pio.wave_send_using_mode(waveid, pigpio.WAVE_MODE_ONE_SHOT_SYNC)
- #                       buffstartdelay=dtime   # remember the last pulse delay to put on front of next pulse sequence
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None

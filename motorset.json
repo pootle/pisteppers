@@ -76,7 +76,7 @@
                 "mode": "software"
             },
             "smartfast": {
-                "stepclass": "stepramp1",
+                "stepclass": "stepramp2",
                 "minstep": 0.0012,
                 "startstep": 0.004,
                 "rampfact": 0.01,
@@ -161,6 +161,15 @@
                 "rampticks": 600,
                 "mode":"software",
                 "stepclass": "stepramp1"
+            },
+            "smartfast": {
+                "stepclass": "stepramp2",
+                "minstep": 0.00105,
+                "startstep": 0.005,
+                "rampfact": 0.03,
+                "rampintvl": 0.06,
+                "rampticks": 75000,
+                "mode":"wave"
             }
         }
     }
