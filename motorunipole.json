@@ -1,0 +1,34 @@
+{
+    "mx": {
+        "motorclass": "ULN",
+        "stepmodes": {
+            "fast": {
+                "stepclass": "stepramp1",
+                "minstep": 0.01,
+                "startstep": 0.05,
+                "rampfact": 0.003,
+                "rampintvl": 0.03,
+                "rampticks": 100,
+                "mode":"wave"
+            },
+            "slow": {
+                "stepclass": "stepramp1",
+                "minstep": 0.1,
+                "startstep": 0.1,
+                "rampfact": 0.05,
+                "rampintvl": 0.05,
+                "rampticks": 800,
+                "mode": "software"
+            },
+            "smartfast": {
+                "stepclass": "stepramp2",
+                "minstep": 0.0012,
+                "startstep": 0.004,
+                "rampfact": 0.01,
+                "rampintvl": 0.02,
+                "rampticks": 75000,
+                "mode":"wave"
+            }
+        }
+    }
+}

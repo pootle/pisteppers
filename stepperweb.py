@@ -1,4 +1,4 @@
-import simplestepper, pagelink
+import steppers, intervalgen, pagelink
 
 from pootlestuff.watchables import myagents
 
@@ -16,7 +16,7 @@ class wwenumint(pagelink.wwenum):
         """
         super().websetter([int(x) for x in webval])
 
-class webapp(simplestepper.multimotor):
+class webapp(steppers.multimotor):
     def __init__(self, **kwargs):
         self.classdefs=classlookups
         super().__init__(**kwargs)
@@ -84,7 +84,6 @@ class webapp(simplestepper.multimotor):
                     'targetdir':motor.userdir.getValue(),
                     'stepmode':motor.userstepm.getValue()}
             iomode=motor.dothis(**mparams)
-            print(iomode)
             if iomode=='wave':
                 fastmotors.append((motor,mparams))
         if fastmotors:
@@ -96,7 +95,7 @@ topfielddefs=(
     (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,        'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
     (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        'max pulses per wave - if pigpio runs out of CBs, decrease this'),
     (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       'motorset controller mode'),
-    (pagelink.wwbutton,'gotonow',   myagents.user,  'run now',              tablefieldcyclicbtndnhtml,  'starts motors running in their selected mode'),
+    (pagelink.wwbutton,'gotonow',   myagents.user,  'Action',               tablefieldcyclicbtndnhtml,  'starts motors running in their selected mode'),
 )
 
 class webgroup():
@@ -116,20 +115,18 @@ class webgroup():
     def makefieldset(self, pagelist, fieldlist=None):
         return {self.prefix+fname: (self.makefield(pagelist, self.webdefs[fname]), self.webdefs[fname][4]) for fname in (self.webdefs.keys() if fieldlist is None else fieldlist)}
 
-class webmotor(simplestepper.stepper, webgroup):
+class webmotor(steppers.A4988stepper, webgroup):
     def __init__(self, **kwargs):
         wables=[  # some extra fields used just for the ui
             ('usercmd',     wv.enumWatch,   self.commands[0],   False,  {'vlist': self.commands}),  # user preset command
             ('userpos',     wv.intWatch,    0,                  False),                             # user target pos for goto mode
             ('userdir',     wv.enumWatch,   'fwd',              False,  {'vlist': ('fwd', 'rev')}), # user direction for run mode
         ]
-        simplestepper.stepper.__init__(self, wabledefs=wables, **kwargs)
+        steppers.A4988stepper.__init__(self, wabledefs=wables, **kwargs)
         webgroup.__init__(self, webdefs=motorfieldindex, prefix=self.name+'_')
 
     def makefieldset(self, pagelist, fieldlist=None):
         basefields = {fname: (self.makefield(pagelist, self.webdefs[fname]), self.webdefs[fname][4]) for fname in (self.webdefs.keys() if fieldlist is None else fieldlist)}
-#        basefields['stepgroups']={stepname: getattr(self.stepmodes,stepname).makefieldset(pagelist, fieldlist=None)}
-#        return
         for stepname in self.stepmodenames:
             stepdeffields=getattr(self.stepmodes,stepname).makefieldset(pagelist, fieldlist=None)
             basefields.update(stepdeffields)
@@ -152,9 +149,42 @@ motorfields=(
 
 motorfieldindex={f[1]: f for f in motorfields}
 
-class webstepcontrolv1(simplestepper.stepcontrols, webgroup):
+class webunimotor(steppers.directstepper, webgroup):
     def __init__(self, **kwargs):
-        simplestepper.stepcontrols.__init__(self, **kwargs)
+        wables=[  # some extra fields used just for the ui
+            ('usercmd',     wv.enumWatch,   self.commands[0],   False,  {'vlist': self.commands}),  # user preset command
+            ('userpos',     wv.intWatch,    0,                  False),                             # user target pos for goto mode
+            ('userdir',     wv.enumWatch,   'fwd',              False,  {'vlist': ('fwd', 'rev')}), # user direction for run mode
+        ]
+        steppers.directstepper.__init__(self, wabledefs=wables, **kwargs)
+        webgroup.__init__(self, webdefs=unimotorfieldindex, prefix=self.name+'_')
+
+    def makefieldset(self, pagelist, fieldlist=None):
+        basefields = {fname: (self.makefield(pagelist, self.webdefs[fname]), self.webdefs[fname][4]) for fname in (self.webdefs.keys() if fieldlist is None else fieldlist)}
+        for stepname in self.stepmodenames:
+            stepdeffields=getattr(self.stepmodes,stepname).makefieldset(pagelist, fieldlist=None)
+            basefields.update(stepdeffields)
+        return basefields
+
+unimotorfields=(
+    (pagelink.wwenum, 'usercmd',    myagents.user,  'next command',    tablefielddropdnhtml,       'next command for this motor'),
+    (pagelink.wwlink, 'userpos',    myagents.user,  'target position', tablefieldinputhtml,        'target position for next goto command'),
+    (pagelink.wwenum, 'userdir',    myagents.user,  'direction',       tablefielddropdnhtml,       'direction for next run command'),
+    (pagelink.wwenum, 'userstepm',  myagents.user,  'step settings',   tablefielddropdnhtml,       'step settings to use for next goto or run command'),
+    (pagelink.wwenum, 'opmode',     myagents.app,   'motor mode',      tablefielddropdnhtml,       'motor controller mode'),
+    (pagelink.wwlink, 'targetrawpos',myagents.app, 'target position',  tablefieldinputhtml,        'target absolute position in microsteps'),
+    (pagelink.wwlink, 'rawposn',    myagents.app,   'current position',tablefieldinputhtml,        'current absolute position in microsteps (does not vary with changes to microstep level)'),
+#    (pagelink.wwlink, 'drive_enable',myagents.NONE, 'drive enable pin',tablefieldinputhtml,        'gpio (broadcom) pin used to drive enable this motor', {'liveformat': '{wl.wable.pinno:d}'}),
+#    (pagelink.wwlink, 'direction',  myagents.NONE,  'direction pin',   tablefieldinputhtml,        'gpio (broadcom) pin used to set step direction for this motor', {'liveformat': '{wl.wable.pinno:d}'}),
+    (pagelink.wwlink, 'holdstopped',myagents.user,  'stop hold time',  tablefieldinputhtml,        'when motor stops, disable output current after this time (in seconds) - 0 means drive chip stays enabled'),
+    (pagelink.wwenum, 'usteplevel', myagents.app,   'microstep level', tablefielddropdnhtml,       'selects level of microstepping in use'),
+)
+
+unimotorfieldindex={f[1]: f for f in unimotorfields}
+
+class webstepcontrolv1(intervalgen.stepcontrols, webgroup):
+    def __init__(self, **kwargs):
+        intervalgen.stepcontrols.__init__(self, **kwargs)
         sfi={'stephead': (pagelink.wwdummy,'settings',   myagents.NONE,   'stepper settings',       tablefieldstatic,           None, {'value':self.name}),}
         sfi.update(sfiv1)
         webgroup.__init__(self, webdefs=sfi, prefix=self.name)
@@ -171,9 +201,9 @@ stepcontrolfieldsv1=(
 
 sfiv1={f[1]: f for f in stepcontrolfieldsv1}
 
-class webstepcontrolv2(simplestepper.stepcontrolgrad, webgroup):
+class webstepcontrolv2(intervalgen.stepcontrolgrad, webgroup):
     def __init__(self, **kwargs):
-        simplestepper.stepcontrolgrad.__init__(self, **kwargs)
+        intervalgen.stepcontrolgrad.__init__(self, **kwargs)
         sfi={'stephead': (pagelink.wwdummy,'settings',   myagents.NONE,   'stepper settings',       tablefieldstatic,           None, {'value':self.name}),}
         sfi.update(sfiv2)
         webgroup.__init__(self, webdefs=sfi, prefix=self.name)
@@ -191,6 +221,7 @@ stepcontrolfieldsv2=(
 sfiv2={f[1]: f for f in stepcontrolfieldsv2}
 
 classlookups = {  # maps the class names in json settings file to actual classes
+    'ULN'       : webunimotor,
     'A4988'     : webmotor,
     'stepramp1' : webstepcontrolv1,
     'stepramp2' : webstepcontrolv2, 
