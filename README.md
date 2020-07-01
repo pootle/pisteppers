@@ -3,43 +3,15 @@ simple code to drive stepper motors from a raspberry pi with good performance an
 
 This code use pigpio waves to drive gpio pins allowing fine cntrol of rampup speed on the steppers.
 
-It is set up to drive steppers through a basic controller such as a Pololu A4988 as described in blog post linked below.
+It is set up to drive steppers through a basic controller such as a Pololu A4988 chip or for unipolar motors via (for example ULN2003).
 
 By using pigpio waves, jitter and timing glitches are minimal allowing the motors to be driven at pretty much their best possible speed, depending on the type of stepper and the load.
 
 More background in blog post here: http://morepootling.blogspot.co.uk/2017/04/final-updates-on-driving-stepper-motors.html
 
-This version is a radical update on the earlier version and includes a simple web server / web front end that can be used to test and tune parameters.
+There is a simple web server / web front end that can be used to test and tune parameters.
 
-## installation
-
-Clone the utilities repository and this repository from github:
-> git clone https://github.com/pootle/pootles_utils.git
-
-> git clone https://github.com/pootle/pisteppers.git
-
-Then switch to pootles_utils folder and run setup to install utilities
-
-> cd pootles_utils
-
-> sudo python3 setup.py install
-
-## setup
-
-The hardware configuration is defined in the file motorset.json.
-Different configuration files can be used, either by changing the entry in the config file, or using the -s parameter whern running the app 
-
-This json file defines the various pins for each function. Any pin that is not relevant set 'pinno' to -1 and the pin is ignored.
-
-pigpio daemon needs to be running to support this software. You can set pigpio daemon to run automatically at boot:
-
-> sudo systemctl enable pigpiod
-
-test run the app:
-
-> ./app.py -c config_full.py
-
-Then use a web browser on any local machine to access the web service on port 8000
+See the wiki for installation and setup instructions
 
 To do a very simple test:
 
