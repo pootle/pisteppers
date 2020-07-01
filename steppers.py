@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 
 """
-A module to drive a stepper motor via a basic driver chip (such as a pololu A4988).
+A module to drive a stepper motor via a basic driver chip (such as a pololu A4988) or drive 
+unipolar steppers via chips such as ULN2003..
 
-It (optionally) controls pins for drive enable, direction and microstep level, and sends
-timed pulses to the step pin.
+For A4988 style drivers, it (optionally) controls pins for drive enable, direction and microstep
+level, and sends timed pulses to the step pin.
 
 The step pin can be driven direct from the software (slowstep), which enables pulse by pulse control
 of the timing - for example where some sort of feedback / PID is required. The timing of individual
@@ -16,7 +17,12 @@ This provides highly accurate timings (accurate to 1 microsecond). The software 
 on a JIT basis, but this does mean that feedback control (for example) will have a delay before 'reaching'
 the motor. The delay depends on how fast the motor is going and how many motors are being run in parallel.
 
-Both fast and slow modes provide functionality to ramp the motor speedup and down, both to allow faster
+For direct driven motors via (for example) ULN2003), the driver directly controls the individual windings.
+In software (slowstep) mode PWM is used to give fine control of the power to each winding. DMA mode only
+switches each winding off or on, so fine grained microstepping is not practical, but much higher speeds
+can be reached.
+
+For both drivers fast and slow modes provide functionality to ramp the motor speedup and down, both to allow faster
 speeds and to avoid sudden loading on the motor or its load.
 
 Details:
@@ -370,14 +376,18 @@ class ustepdefuni(wv.enumWatch):
 
 class directstepper(basestepper):
     """
-    Drives a single unipolar stepper motor with 4 gpio pins driving a set of simple switches (such as a ULN2003.
+    Drives a single unipolar stepper motor with 4 gpio pins driving a set of simple switches (such as a ULN2003).
     
     It provides the same functionality as the A4988 class - see that for further details.
     
     In slow mode, PWM is used on each output stage to to provide smoother running.
     
     In fast (wave) mode each output stage is simply turned on or off, with on used if the value for the pin is 128 - 255.
-    Thus more detailed levels of microstepping are not sensible.
+    Thus more detailed levels of microstepping are not sensible. Also, particularly if the motor is run at low speed, in this mode
+    the motor can get quite hot so it may not be practical for extended continuous running - this depends on the motor, and the speed
+    and load.
+    
+    For now the tables that control the stepping levels are built in.
     """
     def __init__(self, wabledefs, **kwargs):
         self.stepTables={
