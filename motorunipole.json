@@ -2,32 +2,33 @@
     "mx": {
         "motorclass": "ULN",
         "stepmodes": {
-            "fast": {
-                "stepclass": "stepramp1",
-                "minstep": 0.01,
-                "startstep": 0.05,
-                "rampfact": 0.003,
-                "rampintvl": 0.03,
-                "rampticks": 100,
-                "mode":"wave"
+            "onespeed": {
+                "stepclass" : "onespeed",
+                "mode"      : "software",
+                "usteplevel": "double",
+                "step"      : 0.1
             },
-            "slow": {
-                "stepclass": "stepramp1",
-                "minstep": 0.1,
-                "startstep": 0.1,
-                "rampfact": 0.05,
-                "rampintvl": 0.05,
-                "rampticks": 800,
-                "mode": "software"
+            "constaccel": {
+                "stepclass" : "constramp",
+                "mode"      : "software",
+                "usteplevel": "double",
+                "startstep" : 0.5,
+                "minstep"   : 0.05,
+                "slope"     : 5
             },
-            "smartfast": {
-                "stepclass": "stepramp2",
-                "minstep": 0.0012,
-                "startstep": 0.004,
-                "rampfact": 0.01,
-                "rampintvl": 0.02,
-                "rampticks": 75000,
-                "mode":"wave"
+            "wavetestconst": {
+                "stepclass" : "onespeed",
+                "mode"      : "wave",
+                "usteplevel": "double",
+                "step"      : 0.1
+            },
+            "wavetestramp": {
+                "stepclass" : "constramp",
+                "mode"      : "wave",
+                "usteplevel": "double",
+                "startstep" : 0.03,
+                "minstep"   : 0.002,
+                "slope"     : 100
             }
         }
     }

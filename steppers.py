@@ -1,8 +1,7 @@
 #!/usr/bin/python3
 
 """
-A module to drive a stepper motor via a basic driver chip (such as a pololu A4988) or drive 
-unipolar steppers via chips such as ULN2003..
+A module to drive stepper motors via a basic driver chip like the A4988 or even ULN2003.
 
 For A4988 style drivers, it (optionally) controls pins for drive enable, direction and microstep
 level, and sends timed pulses to the step pin.
@@ -36,7 +35,6 @@ functionality. This functionality runs in a separate thread.
 The multimotor class provides coordinated access to multiple motors, in particular it coordinates faststep
 across multiple motors, merging the step streams of the motors using faststep into a single sequence of DMA
 blocks using pigpio waves. (http://abyz.me.uk/rpi/pigpio/python.html#wave_add_new).
-
 """
 import pootlestuff.watchables as wv
 from pootlestuff.watchables import loglvls
@@ -61,39 +59,37 @@ class basestepper(wv.watchablepigpio):
        
     close:  close the motor down - it cannot be used again once closed
     
-    stop:   stop the motor - if it is running in will stop in a controlled manner (i.e. it will decelerate to s
+    stop:   stop the motor - if it is running in will stop in a controlled manner
     
-    goto:   the motor will travel to the target position in the op mode in 'nextopmode'
+    goto:   the motor will travel to the target position
     
     run:    the motor will run at the target speed until stop is requested
 
     The motor can be in 1 of a number of (operation) modes. These are set by the motor and show the current state.
     -------------------------------------------------------
     
-    closed: Motor has shut down and cannot be used - the motor can only be run again by re-creating the object
+    closed  : Motor has shut down and cannot be used - the motor can only be run again by re-creating the object
     
-    stopped:The motor is not currently active.
+    stopped :The motor is not currently active. There may be drive current to hold position.
     
-    going:  The motor is moving to the target location - it will accelerate to the max applicable speed
-            and decelerate to the location
+    running : The motor is actioning a command - usually moving but it may be stationary waiting (for example,
+                paused when about to change direction, or waiting for the target location to change in goto mode)
     
-    moving: The motor is running at the target speed - this will use accelerate and decelerate as appropriate
-    
-    stepmodes provide detailed control of initial speed, maximum speed, acceleration, deceleration (and how they are
-    actioned) as well as whether the stepping will by directly from software or using DMA controlled stepping.
+    stepmodes provide detailed control of step timings by defining the class used to generate tick intervals 
+     as well as whether the stepping will by directly from software or using DMA controlled stepping.
     
     The class runs some aspects of the motor control in its own thread, commands are passed to that thread to process
     
     rawposn is an integer representation of the position in microsteps at the highest microstep level.
     """
     
-    opmodes= ('closed', 'stopped', 'going', 'moving')
+    opmodes= ('closed', 'stopped', 'softrun', 'dmarun')
 
     commands=('none', 'close', 'stop', 'goto', 'run')
 
     def __init__(self, name, app, value, wabledefs=[], **kwargs):
         """
-        sets up a stepper motor driver for an A4988 style chip.
+        sets up a generic stepper motor driver.
         
         name    : used in log messages, and to identify motor in wave processing
         
@@ -106,16 +102,12 @@ class basestepper(wv.watchablepigpio):
         settings must be included in kwargs to define pins and fixed values and limits for the motor. These vary
         with the inheriting class.
 
-        see the example file 'motor.cfg'
+        see the example file 'motorset.json'
 
         kwargs  : other args passed to watchable.
         """
         self.name=name
         self.mthread=None
-        self.cmndq=queue.Queue()
-        self.respq=queue.Queue()
-        self.overrunctr=0
-        self.overruntime=0.0
         self.tlogs={}
         modewables=[]
         rmodes=[]
@@ -124,37 +116,67 @@ class basestepper(wv.watchablepigpio):
             rmodes.append(smode)
         self.stepmodenames=rmodes
         wables=wabledefs+[
-            ('userstepm',   wv.enumWatch,   rmodes[0],          False,  {'vlist': rmodes}),         # available stepping modes
-            ('targetrawpos',wv.intWatch,    0,                  False),                             # target position when in goto mode
-            ('target_dir',  wv.intWatch,    1,                  False),                             # target direction when in run mode - +ve for fwd, -ve for reverse
+            ('userstepm',   wv.enumWatch,   rmodes[0],          False,  {'vlist': rmodes}),         # available stepping modes - belongs in web part, but needs rmodes...
+            ('targetrawpos',wv.intWatch,    0,                  False),                             # target position for goto
+            ('target_dir',  wv.intWatch,    1,                  False),                             # target direction for run - +ve for fwd, -ve for reverse
             ('opmode',      wv.enumWatch,   self.opmodes[1],    False,  {'vlist': self.opmodes}),   # what mode is current - set by the motor
-            ('stepstyle',   wv.enumWatch,   'off',              False,  {'vlist': ('off', 'soft', 'dma')}), # shows if motor is stepping and if so which type
             ('holdstopped', wv.floatWatch,  .5,                 False),     # when motor stops, drive_enable goes false after this time (in seconds), 0 means drive always enabled
             ('rawposn',     wv.intWatch,    0,                  False),     # current position in microsteps (not totally up to date while fast stepping)
             ('ticktime',    wv.floatWatch,  0,                  False),     # minimum step interval (clamped to minslow for slow stepping)
             ('stepmodes',   wv.watchablesmart,None,             False,  {'wabledefs': modewables}), # the available stepper control modes
+            ('activestepm', wv.textWatch,   '-',                False),     # when running shows the active step mode
         ]
         super().__init__(wabledefs=wables, app=app, value=value, **kwargs)
-        self.pending=None
-        self.dothis('stop')
-        self.mthread=threading.Thread(name='stepper'+self.name, target=self._thrunner)
         self.log(loglvls.INFO,'starting motor %s thread stepper using class %s' % (self.name, type(self).__name__))
-        self.maxstepfactor = self.usteplevel.maxusteps()
-        self.mthread.start()
+        self.maxstepfactor = self.getmaxusteplevel()
 
-    def cleanstop(self):
-        self.dothis(command='close')
+    def waitstop(self):
+        if not self.mthread is None:
+            self.mthread.join()
+        self.drive_enable.setValue('disable', wv.myagents.app)
+        self.opmode.setValue('closed', wv.myagents.app)
 
     def dothis(self, command, targetpos=None, targetdir=None, stepmode=None):
+        curmode=self.opmode.getValue()
+        if curmode=='closed':
+            return None
         assert command in self.commands
-        if command is ('goto', 'run'):
-            assert self.opmode.getValue() == 'stopped'
-            assert stepmode in self.userstepm.vlist
-            if command == 'run':
-                assert targetdir in ('fwd','rev')
-            if command == 'goto':
-                assert isinstance(targetpos, (int,float))
-        if command != 'none':
+        if command in ('goto', 'run'):
+            if curmode == 'stopped':
+                assert stepmode in self.userstepm.vlist
+                if command == 'run':
+                    assert targetdir in ('fwd','rev')
+                if command == 'goto':
+                    assert isinstance(targetpos, (int,float))
+                stepdef=getattr(self.stepmodes, stepmode)
+                if stepdef.mode=='software':
+                    self.stepactive=True
+                    self.stepinf=stepdef
+                    self.opmode.setValue('softrun', wv.myagents.app)   # opmode returns to stopped when the thread is about to exit
+                    self.mthread= threading.Thread(name=self.name+'_softrun', target=self._softrun, kwargs={
+                            'stepinf': stepdef,
+                            'command': command, 
+                            'targetpos': targetpos, 
+                            'targetdir': targetdir})
+                    self.mthread.start()
+                elif stepdef.mode=='wave':
+                    return 'wave'
+                else:
+                    raise NotImplementedError('oopsy')
+            else:
+                if not targetpos is None:
+                    self.targetrawpos.setValue(targetpos, wv.myagents.app)                  # these 2 are monitored by the stepgenerator
+                if not targetdir is None:
+                    self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
+                
+        elif command=='close' or command=='stop':
+            curmode=self.opmode.getValue()
+            if curmode=='stopped' or curmode=='closed':
+                self.drive_enable.setValue('disable', wv.myagents.app)
+            elif curmode=='softrun' or curmode=='dmarun':
+                print('tell ticker to stop')
+                self.stepactive=False
+        elif command != 'none':
             print('putting', command)
             self.cmndq.put_nowait((self._command, {'command': command, 'targetpos': targetpos, 'targetdir': targetdir, 'stepmode': stepmode}))
             if command in ('goto', 'run'):
@@ -172,105 +194,10 @@ class basestepper(wv.watchablepigpio):
         stepgen=getattr(self.stepmodes,stepmode)
         mtype=stepgen.mode
         if mtype=='wave':
+            print('setup pulse', stepgen.mode, type(stepgen).__name__)
+            self.stepactive=True
             return self.pulsegen(stepgen, **kwargs)
         return None
-
-    def _command(self, command, targetpos, targetdir, stepmode):
-        print('setting pending======================', command)
-        self.pending={'command': command, 'targetpos': targetpos, 'targetdir': targetdir, 'stepmode': stepmode}
-
-    def _thrunner(self):
-        self.log(loglvls.INFO,'%s motor thread running', self.name)
-        self.opmode.setIndex(1, wv.myagents.app)
-        self.stepstyle.setIndex(0, wv.myagents.app)
-        abs_start=time.time()
-        abs_thread=time.thread_time()
-        abs_process=time.process_time()
-        while self.opmode.getIndex() != 0:  # mode zero means time to exit thread
-            cmd='stop' if self.pending is None else self.pending['command']
-            if cmd=='close':
-                self.opmode.setIndex(0, wv.myagents.app)
-            elif cmd=='stop':
-                self.pending=None
-                self._thrun_stopped()
-            else:
-                print('_________________', self.pending)
-                stepsettings=getattr(self.stepmodes,self.pending['stepmode'])
-                self.opmode.setValue('going' if cmd=='goto' else 'moving', wv.myagents.app)
-                comdetails=self.pending
-                self.pending=None
-                if stepsettings.mode=='wave':
-                    self._thrun_faststep()
-                elif stepsettings.mode=='software':
-                    self.stepstyle.setValue('soft', wv.myagents.app)
-                    self._slowrun(stepsettings, command=comdetails['command'], targetpos=comdetails['targetpos'], targetdir=comdetails['targetdir'])
-                else:
-                    self.log(loglvls.ERROR,'%s unknown motor mode %s' % (self.name, stepsettings.mode))
-                self.opmode.setValue('stopped', wv.myagents.app)
-        self._thcloseIO()
-        self.log(loglvls.INFO,'%s exiting motor thread. Execution summary: elapsed: %7.2f, process: %7.2f, thread: %7.2f' % (self.name,
-                    time.time()-abs_start, time.process_time()-abs_process, time.thread_time()-abs_thread))
-        return
-
-    def _thwaitq(self, waittill=None, delay=None):
-        """
-        uses delay if set, otherwise calculates required delay.
-
-        waits on the command q till for at most the required delay
-        
-        if nothing arrived on the q it returns True
-        
-        if anything returned on the q and has been processed it returns False (to signify the target time has not been reached, but
-        something has changed), this allows loops to react quickly to changed settings
-        """
-        if delay is None:
-            delay=waittill-time.time()
-        try:
-            if delay <= 0:
-                self.overrunctr+=1
-                self.overruntime-=delay
-                method, kwargs = self.cmndq.get_nowait()
-            else:
-                method, kwargs = self.cmndq.get(timeout=delay)
-        except:
-            method=None
-        if method is None:
-            return True
-        print(kwargs)
-        method(**kwargs)
-        return False
-
-    def _thrun_stopped(self):
-        """
-        this function runs in the motor thread while the mode is 'stopped'.
-        
-        if holdstopped is zero it sets drive_enable (we arrive here on first setup), otherwise it waits for holdstopped time then 
-        disables the drive
-        """
-        if self.holdstopped.getValue() == 0:
-            self.drive_enable.setValue('enable',wv.myagents.app)
-            holdtimeout=None
-        else:
-            holdtimeout=time.time() + self.holdstopped.getValue()
-        self.log(loglvls.INFO, "%s entering mode 'stopped with timeout %4.2f" % (self.name, holdtimeout))
-        while self.pending==None:
-            if holdtimeout:
-                self._thwaitq(waittill=holdtimeout)
-            else:
-                self._thwaitq(delay=1)
-            if holdtimeout and holdtimeout < time.time():
-                print('turn off', self.drive_enable.setValue('disable',wv.myagents.app))
-                holdtimeout=None
-        self.log(loglvls.INFO, "%s leaving mode 'stopped'" % self.name)
-
-    def _thrun_faststep(self):
-        """
-        with runfast, the real work is done in the motorset class, so this just idles until the mode changes again
-        """
-        self.log(loglvls.INFO, "%s entering faststep" % self.name)
-        while self.pending==None:
-            self._thwaitq(delay=1)
-        self.log(loglvls.INFO, "%s leaving faststep" % self.name)
 
     def starttimelog(self, logname):
         withlog={}
@@ -287,29 +214,25 @@ class basestepper(wv.watchablepigpio):
         else:
            return None
 
-    def _slowrun(self, stepinf, command, targetpos, targetdir):
+    def _softrun(self, stepinf, command, targetpos, targetdir):
         """
         drives the motor stepping from software.
         
         It gets the step interval from the tick generator, which monitors both the target mode of the motor and
-        the target position to manage ramping, it uses _thwaitq to delay for the required time, _thwaitq also
-        picks up incoming commands and processes them.
+        the target position to manage ramping.
         """
-        self.opmode.setValue({'goto': 'going', 'run': 'moving'}[command], wv.myagents.app)
-        self.targetrawpos.setValue(targetpos, wv.myagents.app)
-        self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
-        self.usteplevel.setValue(stepinf.usteps.getValue(), wv.myagents.app)
+        self.targetrawpos.setValue(targetpos, wv.myagents.app)                  # these 2 are monitored by the stepgenerator
+        self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app) # ditto
+        self.activestepm.setValue(stepinf.usteplevel.getValue(), wv.myagents.app)
         self.drive_enable.setValue('enable', wv.myagents.app)
-        self.log(loglvls.INFO, '%s _slowrun starts' % self.name)
-        self.tickgenactive=True
-        realstep=True
+        self.log(loglvls.INFO, '%s _softrun starts' % self.name)
         self.overrunctr=0
         self.overruntime=0.0
-        tickmaker=stepinf.tickgen()
-        steptrig=self.getstepfunc()
+        tickmaker=stepinf.tickgen(command, self.rawposn.getValue())
+        steptrig=self.getstepfunc(stepinf)
         directionset=self.direction.setValue
         posnset = self.rawposn.setValue
-        self.starttimelog('slowrun')
+        self.starttimelog('softrun')
         nextsteptime=time.time()
         posupdatetime=nextsteptime+.8
         tickctr=0
@@ -317,62 +240,55 @@ class basestepper(wv.watchablepigpio):
         stoppedtimer=None
 #        tlf=open('tlog.txt','w')
         tstart=time.time()
-        repeat=0
         while True:
-            if realstep:
-                if repeat > 0:
-                    repeat -=1
-                    newpos += poschange
-                else:
-                    try:
-                        dirchange, ticktime, newpos, repeat, tickintvl, poschange = next(tickmaker)
-                    except StopIteration:
-                        self.log(loglvls.DEBUG,'StopIteration!!!!!!!')
-                        break
-                if dirchange:
-                    print('setting direction to', dirchange)
-                    directionset(dirchange, wv.myagents.app)
-                if ticktime is None:
+            try:
+                dirchange, ticktime, newpos = next(tickmaker)
+            except StopIteration:
+                self.log(loglvls.INFO,'StopIteration!!!!!!!')
+                break
+            if dirchange:
+                print('setting direction to', dirchange)
+                directionset(dirchange, wv.myagents.app)
+            if ticktime is None:
 #                    tlf.write('skip at %7.5f\n' % (time.time()-tstart))
-                    mode=self.opmode.getIndex()
-                    if mode==2:  # its a goto - exit
-                        break
-                    nextsteptime += .05
-                    if stoppedtimer is None:
-                        holdtime=self.holdstopped.getValue()
-                        if holdtime > 0:
-                            stoppedtimer=time.time()+holdtime
-                    else:
-                        if time.time() > stoppedtimer:
-                            self.drive_enable.setValue('disable', wv.myagents.app)
-                            stoppedtimer += 1000
-                            self.log(loglvls.DEBUG, "{} has turned off drive current.".format(self.name))
-                            break
+                mode=self.opmode.getIndex()
+                if mode==2:  # its a goto - exit
+                    self.log(loglvls.INFO,'null tick with goto - completed goto')
+                    break
+                nextsteptime += .05
+                if stoppedtimer is None:
+                    holdtime=self.holdstopped.getValue()
+                    if holdtime > 0:
+                        stoppedtimer=time.time()+holdtime
                 else:
-                    if not stoppedtimer is None:
-                        self.drive_enable.setValue('enable', wv.myagents.app)
-                    steptrig()
+                    if time.time() > stoppedtimer:
+                        self.drive_enable.setValue('disable', wv.myagents.app)
+                        stoppedtimer += 1000
+                        self.log(loglvls.INFO, "{} has turned off drive current.".format(self.name))
+                        break
+            else:
+                if not stoppedtimer is None:
+                    self.drive_enable.setValue('enable', wv.myagents.app)
+                steptrig()
 #                    tlf.write('step at %7.5f\n' % (time.time()-tstart))
-                    stoppedtimer=None
-                    tickctr+=1
-                    nextsteptime += ticktime
-                if time.time() > posupdatetime:
-                    posnset(newpos, wv.myagents.app)
-                    posupdatetime += .8
-            realstep=self._thwaitq(nextsteptime)
+                stoppedtimer=None
+                tickctr+=1
+                nextsteptime += ticktime
+            if time.time() > posupdatetime:
+                posnset(newpos, wv.myagents.app)
+                posupdatetime += .8
+            delay=nextsteptime - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                self.overrunctr+=1
+                self.overruntime+=-delay
 #        tlf.close()
         self.log(loglvls.INFO, "%s _slowrun complete, now at %s, %d overruns of %d ticks, total overrun: %7.3f." % (self.name, newpos, self.overrunctr, tickctr, self.overruntime))
         if not newpos is None:
              posnset(newpos, wv.myagents.app)
-        self.log(loglvls.INFO, self.reporttimelog('slowrun'))
-
-class ustepdefuni(wv.enumWatch):
-    def __init__(self, motor, **kwargs):
-        self.motor=motor
-        super().__init__(**kwargs)
-
-    def maxusteps(self):
-        return max([st['factor'] for st in self.motor.stepTables.values()])
+        self.endstepping()
+        self.log(loglvls.INFO, self.reporttimelog('softrun'))
 
 class directstepper(basestepper):
     """
@@ -390,15 +306,15 @@ class directstepper(basestepper):
     For now the tables that control the stepping levels are built in.
     """
     def __init__(self, wabledefs, **kwargs):
-        self.stepTables={
-                'single'    : {'factor':4, 'table':
+        self.ustepTables={
+                'single'    : {'factor':1, 'table':
                             ((255, 0, 0, 0), (0, 255, 0, 0), (0, 0, 255, 0), (0, 0, 0, 255))},          # energise each coil in turn
-                'double'    : {'factor':4, 'table':
+                'double'    : {'factor':1, 'table':
                             ((255, 255, 0, 0), (0, 255, 255, 0), (0, 0, 255, 255), (255, 0, 0, 255))},  # energise pairs of coils in turn
                 'two'       : {'factor':2, 'table': 
                             ((255, 0, 0, 0), (128,128, 0, 0), (0,255, 0, 0), (0, 128, 128, 0),          # 
                               (0, 0, 255, 0), (0, 0, 128, 128), (0, 0, 0, 255), (128, 0, 0, 128))},
-                'four'      : {'factor':1, 'table': ((255, 0, 0, 0),
+                'four'      : {'factor':4, 'table': ((255, 0, 0, 0),
                                                      (192, 64, 0, 0),
                                                      (128, 128, 0, 0),
                                                      (64, 192,0,0),
@@ -416,41 +332,49 @@ class directstepper(basestepper):
                                                      (192, 0, 0, 64),
                                )},
             }
-        steptypes=list(self.stepTables.keys())
+        self.usteptypes=list(self.ustepTables.keys())
         wables=wabledefs+[
             ('drive_enable',    wv.enumWatch,       'disable',      False, {'vlist': ('enable', 'disable')}),
             ('direction',       wv.enumWatch,       'F',            False, {'vlist': ('F','R')}),
             ('drive_pins',      wv.textWatch,       '17 23 22 27',  False),    # list of the pins in use
             ('drive_hold_power',wv.intWatch,        55,             False, {'minv':0, 'maxv':255}),   # power factor used when stationary
-            ('usteplevel',      ustepdefuni,        steptypes[0],   False, {'vlist': steptypes, 'motor': self}), # sets up the available step modes
         ]
         super().__init__(wabledefs=wables, **kwargs)
         self.pins=[int(p) for p in self.drive_pins.getValue().split()]
         assert len(self.pins) == 4
         for i in self.pins:
             assert isinstance(i, int) and 0<i<32
-        self.stepindex=0    # index into self.stepTables to show where we are
-        self.activetable=self.stepTables[self.usteplevel.getValue()]['table']
-        self.lastpinvals=[None, None, None, None]
+        self.stepindex=0    # index into active stepping table to show which step we're at
+        self.activetable=None
+        self.lastpinvals=[None] * len(list(self.ustepTables.values())[0]['table'])
         self.output_enable(None, None, 'disable', None)
         self.drive_enable.addNotify(self.output_enable, wv.myagents.app)
-        self.usteplevel.addNotify(self.setstepinfo, wv.myagents.app)
-        self.usteplevel.addNotify(self.setstepinfo, wv.myagents.user)
 
     def output_enable(self,  watched, agent, newValue, oldValue):
         powlevel=self.drive_hold_power.getValue() if newValue=='enable' else 0
         print('--------------------disable outputs with power level', powlevel)
-        pinvals=self.activetable[self.stepindex if self.stepindex < len(self.activetable) else 0] 
+        pinvals=0 if self.activetable is None else self.activetable['table'][self.stepindex if self.stepindex < len(self.activetable) else 0] 
         for pix, p in enumerate(self.pins):
             self.pio.set_PWM_dutycycle(p, 0 if pinvals == 0 else powlevel) 
         self.log(wv.loglvls.DEBUG,' output pins set to dutycycle %d' % powlevel)
 
-    def setstepinfo(self, watched, agent, newValue, oldValue):
-        self.activetable=self.stepTables[newValue]['table']
-        self.stepindex=0
+    def getmaxusteplevel(self):
+        return max([st['factor'] for st in self.ustepTables.values()])
 
-    def getusteplevelint(self):
-        return self.stepTables[self.usteplevel.getValue()]['factor']
+    def getusteplevel(self, usteplevelname):
+        return self.ustepTables[usteplevelname]['factor']
+
+    def getustepnames(self):
+        return list(self.ustepTables.keys())
+
+    def endstepping(self):
+        """
+        called when a software step or dma step has completed to reset motor state
+        """
+        for pix, p in enumerate(self.pins):
+            self.pio.set_PWM_dutycycle(p, 0) 
+        self.opmode.setValue('stopped', wv.myagents.app)
+        self.stepactive=False
 
     def crashstop(self):
         """
@@ -460,7 +384,13 @@ class directstepper(basestepper):
             self.pio.set_PWM_dutycycle(p,0)
         self.mode.setValue('closed',wv.myagents.user)
 
-    def getstepfunc(self):
+    def getstepfunc(self, stepinf):
+        """
+        called when a new software step run is starting.
+        """
+        self.activetable=self.ustepTables[stepinf.usteplevel.getValue()]
+        for i in range(len(self.lastpinvals)):
+            self.lastpinvals[i]=None
         return self.stepmotor
 
     def stepmotor(self):
@@ -468,16 +398,17 @@ class directstepper(basestepper):
         When stepping directly from code, this function is called for each step.
         """
         six=self.stepindex
+        valtable=self.activetable['table']
         if self.direction.getValue()=='F':
             six += 1
-            if six >= len(self.activetable):
+            if six >= len(valtable):
                 six=0
         else:
             six -= 1
             if six < 0:
-                six=len(self.activetable)-1
+                six=len(valtable)-1
         self.stepindex=six
-        pvals=self.activetable[six]
+        pvals=valtable[six]
         pio=self.app.pio
         for ix, pf in enumerate(pvals):
             if pf != self.lastpinvals[ix]:
@@ -495,7 +426,10 @@ class directstepper(basestepper):
             3: raw position of this motor after this pulse
             4: the name of this motor
         """
-        self.opmode.setValue({'goto': 'going', 'run': 'moving'}[command], wv.myagents.app)
+        usteping=stepdef.usteplevel.getValue()
+        activetable=self.ustepTables[usteping]
+        self.activestepm.setValue(usteping, wv.myagents.app)
+        self.opmode.setValue('dmarun', wv.myagents.app)
         self.targetrawpos.setValue(targetpos, wv.myagents.app)
         self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
         pio=self.app.pio
@@ -505,7 +439,7 @@ class directstepper(basestepper):
             pio.write(pinno,0)
             pinbits.append(1<<pinno)
         stepbits=[]
-        for pinvals in self.activetable:
+        for pinvals in activetable['table']:
             onb=0
             offb=0
             for ix, onebit in enumerate(pinbits):
@@ -514,43 +448,41 @@ class directstepper(basestepper):
                 else:
                     offb |= onebit
             stepbits.append((onb,offb))
-        self.usteplevel.setValue(stepdef.usteps.getValue(), wv.myagents.app)
         self.tickgenactive=True
-        tickmaker=stepdef.tickgen()
+        self.stepactive=True
+        tickmaker=stepdef.tickgen(command,self.rawposn.getValue())
         usclock=0
         overflow=0.0
-        repeat=0
         startup=True
         while True:
-            if repeat > 0:
-                repeat -=1
-                newpos += poschange
-            else:
-                try:
-                    dirchange, ticktime, newpos, repeat, tickintvl, poschange = next(tickmaker)
-                except StopIteration:
-                    break
+            try:
+                dirchange, ticktime, newpos = next(tickmaker)
+            except StopIteration:
+                break
             if ticktime is None:
-                delay, overflow = (None, 0)
+                self.log(loglvls.INFO,'Null pulse - we are done')
+                break
+#                delay, overflow = (None, 0)
             else:
                 delay, overflow=divmod(ticktime*1000000+overflow,1)
-            if dirchange:
+            if not dirchange is None:
                 tabinc=1 if dirchange=='F' else -1
             yield stepbits[self.stepindex] + (usclock, newpos, self.name)
             if delay is None:
                 break
             else:
                 usclock += int(delay)
-            if tabinc > 0:
-                self.stepindex += 1
-                if self.stepindex >= len(pinbits):
-                    self.stepindex=0
-            else:
-                self.stepindex -= 1
-                if self.stepindex < 0:
-                    self.stepindex = len(pinbits)-1
-        self.drive_enable.setValue('disable', wv.myagents.app)
-
+            try:
+                if tabinc > 0:
+                    self.stepindex += 1
+                    if self.stepindex >= len(pinbits):
+                        self.stepindex=0
+                else:
+                    self.stepindex -= 1
+                    if self.stepindex < 0:
+                        self.stepindex = len(pinbits)-1
+            except:
+                print('oooopsy ---------------', dirchange, ticktime, newpos)
 
 class A4988stepper(basestepper):
     """
@@ -564,11 +496,31 @@ class A4988stepper(basestepper):
             ('drive_enable',gpp.gpio_out_pin,None,              False,  {'name': 'drive enable', 'loglevel': wv.loglvls.DEBUG}),  # sets up drive enable pin
             ('direction',   gpp.gpio_out_pin,None,              False,  {'name': 'direction'}),     # sets up direction pin
             ('step',        gpp.gpio_trigger_pin,None,          False,  {'name': 'step'}),          # sets up step pin
-            ('usteplevel',  gpp.usteplevel_pinset,None,         False),     # sets up the pins used to control microstep level
+            ('usteppins',   gpp.usteplevel_pinset,None,         False),                             # sets up the pins used to control microstep level
         ]
-        self.pinsetuplist=('drive_enable','direction','step','usteplevel')
+        self.pinsetuplist=('drive_enable','direction','step','usteppins')
         super().__init__(wabledefs=wables, **kwargs)
 
+    def getmaxusteplevel(self):
+        return self.usteppins.maxusteps()
+
+    def getusteplevel(self, usteplevelname):
+        """
+        returns number of (micro) steps per full step for the named level
+        """
+        return self.usteppins.microstepset[usteplevelname]['factor']
+
+    def getustepnames(self):
+        return list(self.usteppins.microstepset.keys())
+
+    def endstepping(self):
+        """
+        called when a software step or dma step has completed to reset motor state
+        """
+        self.drive_enable.setValue('disable', wv.myagents.app)
+        self.opmode.setValue('stopped', wv.myagents.app)
+        self.stepactive=False
+        
     def crashstop(self):
         """
         immediate stop.
@@ -576,20 +528,14 @@ class A4988stepper(basestepper):
         self.drive_enable.setValue('disable', wv.myagents.user)
         self.mode.setValue('closed',wv.myagents.user)
 
-    def getstepfunc(self):
+    def getstepfunc(self, stepinf):
+        """
+        called when a new software step run is starting.
+        """
         return self.step.trigger
 
     def getusteplevelint():
-        return self.usteplevel.getValue()
-
-    def _thrun_faststep(self):
-        """
-        with runfast, the real work is done in the motorset class, so this just idles until the mode changes again
-        """
-        self.log(loglvls.INFO, "%s entering mode 'faststep'" % self.name)
-        while self.pending==None:
-            self._thwaitq(delay=1)
-        self.log(loglvls.INFO, "%s leaving mode 'faststep'" % self.name)
+        return self.usteppins.getValue()
 
     def pulsegen(self, stepdef, command, targetpos, targetdir):
         """
@@ -602,16 +548,16 @@ class A4988stepper(basestepper):
             3: raw position of this motor after this pulse
             4: the name of this motor
         """
-        self.opmode.setValue({'goto': 'going', 'run': 'moving'}[command], wv.myagents.app)
+        self.opmode.setValue('dmarun', wv.myagents.app)
         self.targetrawpos.setValue(targetpos, wv.myagents.app)
         self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
         dirvar=self.direction
         setdir={'F':dirvar.getBits('F'),
                 'R':dirvar.getBits('R')}
         dirbit=1<<dirvar.pinno
-        self.usteplevel.setValue(stepdef.usteps.getValue(), wv.myagents.app)
         self.tickgenactive=True
-        tickmaker=stepdef.tickgen()
+        stepdef.running=True
+        tickmaker=stepdef.tickgen(command, self.rawposn.getValue())
         stepvar=self.step
         pulselen=stepvar.pulsetime
         stepa=1<<stepvar.pinno if stepvar.vlist[0] == 0 else 0
@@ -622,17 +568,13 @@ class A4988stepper(basestepper):
         overflow=0.0
         pulseoff=[offbits, onbits, 0, 0, self.name]
         pulseon=[onbits, offbits, 0, 0, self.name]
-        repeat=0
         startup=True
         while True:
-            if repeat > 0:
-                repeat -=1
-                newpos += poschange
-            else:
-                try:
-                    dirchange, ticktime, newpos, repeat, tickintvl, poschange = next(tickmaker)
-                except StopIteration:
-                    break
+            try:
+                dirchange, ticktime, newpos = next(tickmaker)
+            except StopIteration:
+                delay, overflow = (None, 0)
+                break
             if ticktime is None:
                 delay, overflow = (None, 0)
             else:
@@ -641,27 +583,48 @@ class A4988stepper(basestepper):
                 dirbits=setdir[dirchange]
                 if startup:
                     driveenbits=self.drive_enable.getBits('enable')
-                    dirbits = (dirbits[0] | driveenbits[0], dirbits[1] | driveenbits[1])
+                    mslevelbits=self.usteppins.pinbits(stepdef.usteplevel.getValue())
+                    dirbits = (dirbits[0] | driveenbits[0] | mslevelbits[0], dirbits[1] | driveenbits[1] | mslevelbits[1])
                     startup=False
-                print('setting dir', dirchange, dirbits)
-                yield (onbits | dirbits[0], offbits | dirbits[1], usclock, newpos, self.name)
+                yield (dirbits[0], dirbits[1], usclock, newpos, self.name) # setup all the control pins and wait a mo
+                pulseon[2]=usclock+1
+                pulseon[3]=newpos
+                yield pulseon
+                pulseoff[2]=usclock + 1 + pulselen
+                pulseoff[3]=newpos
             else:
                 pulseon[2]=usclock
                 pulseon[3]=newpos
                 yield pulseon
-            usclock += pulselen
-            pulseoff[2]=usclock
-            pulseoff[3]=newpos
+                pulseoff[2]=usclock + pulselen
+                pulseoff[3]=newpos
+#            print('d', pulseoff[2])
             yield pulseoff
             if delay is None:
+                usclock += pulselen
                 break
             else:
-                usclock += int(delay)-pulselen
-        self.drive_enable.setValue('disable', wv.myagents.app)
+                usclock += int(delay)
+        holdtime=self.holdstopped.getValue()
+        holddelay=100 if holdtime ==0 else int(round(holdtime*1000000))
+        disbits=self.drive_enable.getBits('disable')
+        if delay is None or delay  >= holddelay:
+            usclock += 1
+        else:
+            dly=int(holddelay-delay)
+            assert dly > 0
+            usclock += dly
+#            print('e', usclock)
+            yield 0, 0, usclock, newpos, self.name
+#        print('--->', usclock)
+        yield disbits + (usclock, newpos, self.name)
 
     def _thcloseIO(self):
         for pinname in self.pinsetuplist:
             getattr(self,pinname).shutdown()
+
+def pinnos(vv):
+    return ' '.join(['%2d' % i for i in range(32) if (1<<i & vv) !=0])
 
 controllermodes=('closed', 'off', 'faststep')
 
@@ -672,7 +635,7 @@ class multimotor(wv.watchablepigpio):
             ('pigpppw',     wv.intWatch,    0,                  False),
             ('pigpbpw',     wv.intWatch,    0,                  False),
             ('mode',        wv.enumWatch,   controllermodes[1], False,  {'vlist': controllermodes}),
-            ('gotonow',     wv.btnWatch,    'goto now',         False),
+            ('gotonow',     wv.btnWatch,    'Action',           False),
             ('wavepulses',  wv.intWatch,    1000,               True,   {'minv':100}),
         ]
         if gpiolog:
@@ -701,7 +664,9 @@ class multimotor(wv.watchablepigpio):
         for th in threading.enumerate():
             print('thread' + th.name)
         for motor in self.motors.values():
-            motor.cleanstop()
+            motor.dothis(command='close')
+        for motor in self.motors.values():
+            motor.waitstop()
         self.mode.setValue('closed', wv.myagents.app)
 
     def runfast(self, motorlist):
@@ -745,7 +710,7 @@ class multimotor(wv.watchablepigpio):
     def _threadfaststep(self, motorlist):
         """
         fast step request - get the motors involved and .....
-        motorposns: a dict with a key for each motor to use, and the value is the target position for that motor
+        motorlist: a dict with a key for each motor to use, and the value is the params for the motor
         """
         self.log(loglvls.INFO, "starting mode 'fast")
         timestart=time.time()
@@ -755,7 +720,6 @@ class multimotor(wv.watchablepigpio):
             tgen=motor.fastgoto(**moveparams)
             if not tgen is None:
                 mgens.append((motor.name, tgen))
-                motor.opmode.setValue({'goto': 'going', 'run': 'moving'}[moveparams['command']], wv.myagents.app)
                 motors[motor.name]=motor
         mstime=0
         if len(mgens) > 0:
@@ -764,18 +728,19 @@ class multimotor(wv.watchablepigpio):
                 thisp=next(mergegen)
             except StopIteration:
                 thisp=None
-
             self.pio.wave_clear()
             moredata=True
             pendingbufs=[]
             buffends=[]
-            logf=open('tnewmllog.txt','w')
-#            logf=None
+            maxpulses=self.wavepulses.getValue()
+#            logf=open('pulselog.csv','w')
+            logf=None
             while moredata:
                 while len(pendingbufs) < 3 and moredata:
                     nextbuff=[]
                     mposns={}
-                    while len(nextbuff) < self.wavepulses.getValue():
+                    bufftime=1000000            # count the time and stop adding pulses if we get to 1 second
+                    while len(nextbuff) < maxpulses:
                         try:
                             nextp=next(mergegen)
                         except StopIteration:
@@ -783,16 +748,30 @@ class multimotor(wv.watchablepigpio):
                         if nextp is None:
                             nextbuff.append(pigpio.pulse(thisp[0], thisp[1], 1))
                             moredata=False
+                            thisp=nextp
                             break
                         else:
                             dtime=nextp[2]-thisp[2]
+                            assert dtime >= 0
                             nextbuff.append(pigpio.pulse(thisp[0], thisp[1], dtime))
-                            if not logf is None and dtime != 2:
-                                logf.write('%5d  %x   %x\n' % (dtime,thisp[0],thisp[1]))
-                        thisp=nextp
+                            thisp=nextp
+                            bufftime -= dtime
+                            if bufftime <= 0:
+                                break
                         mposns[thisp[4]]=thisp[3]
                     if len(nextbuff) > 0:
-                        pcount=self.pio.wave_add_generic(nextbuff)
+                        if not logf is None:
+                            for pp in nextbuff:
+                                if pp.delay != 2:
+                                    logf.write('%8x, %8x, %5d\n' % (pp.gpio_on, pp.gpio_off, pp.delay))
+                        try:
+                            pcount=self.pio.wave_add_generic(nextbuff)
+                        except Exception as ex:
+                            '''oh dear we screwed up - let's print the the data we sent'''
+                            print('FAIL in wave_add_generic' + str(ex))
+                            for i, p in enumerate(nextbuff):
+                                print('%4d: on: %8x, off: %8x, delay: %8d' % (i, p.gpio_on, p.gpio_off, p.delay ))
+                            raise
                         waveid=self.pio.wave_create()
                         pendingbufs.append(waveid)
                         buffends.append(mposns)
@@ -801,7 +780,6 @@ class multimotor(wv.watchablepigpio):
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None
-
                 if len(pendingbufs) > 0:
                     self._thwaitq(time.time()+.04)
                     current=self.pio.wave_tx_at()
@@ -819,7 +797,8 @@ class multimotor(wv.watchablepigpio):
                         pass
                     else:
                         self.log(loglvls.DEBUG,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAArg')
-
+            if not logf is None:
+                logf.close()
             self.log(loglvls.DEBUG, 'final waves %d' % len(pendingbufs))
             while len(pendingbufs) > 0:
                 self._thwaitq(time.time()+.2)
@@ -837,11 +816,10 @@ class multimotor(wv.watchablepigpio):
                 else:
                     self.log(loglvls.DEBUG,'BBBBBBBBBBBBBBBBBBBBBBBBBBAArg')
 #            self.pigp.wave_clear()
-            if not logf is None:
-                logf.close()
         self.log(loglvls.INFO, "motoset leaving mode fast")
         for motor in motors.values():
-            motor.dothis(command =   'stop')
+            motor.endstepping()
+#            motor.dothis(command =   'stop')
         self.mode.setValue('off', wv.myagents.app)
 #            self.log(logging.INFO, self.reporttimelog('fastrun'))
 
@@ -860,11 +838,13 @@ class multimotor(wv.watchablepigpio):
         if len(mpulses) == 0:
             pass
         elif len(mpulses) == 1:
+            gen=newgens[0][1]
+            yield mpulses[0]
             while True:
-                yield mpulses[0]
                 try:
-                    mpulses[0]=next(newgens[0][1])
+                    yield next(gen)
                 except StopIteration:
+                    self.log(loglvls.INFO,'pulsemerge single pulse mode - complete')
                     break
         elif len(mpulses)==2:
             genA=newgens[0]
