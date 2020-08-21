@@ -1,6 +1,7 @@
 {
-    "mx": {
+    "byj": {
         "motorclass": "ULN",
+        "drive_pins": "6 5 7 8",
         "stepmodes": {
             "onespeed": {
                 "stepclass" : "onespeed",

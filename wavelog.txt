@@ -1,0 +1,13 @@
+wave_add_generic - count now 80
+wave 0 created with 160 cbs
+wave_send_using_mode_one_shot_sync - 0
+wave_add_generic - count now 181
+wave 1 created with 362 cbs
+wave_send_using_mode_one_shot_sync - 1
+wave_add_generic - count now 172
+wave 2 created with 344 cbs
+wave_send_using_mode_one_shot_sync - 2
+wave 0 deleted
+wave_add_generic - count now 68
+wave 0 created with 136 cbs
+wave_send_using_mode_one_shot_sync - 0

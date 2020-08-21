@@ -99,7 +99,7 @@ class basestepper(wv.watchablepigpio):
         
         wabledefs: extra watchables to be included in the object 
         
-        settings must be included in kwargs to define pins and fixed values and limits for the motor. These vary
+        settings must be included in kwargs to define pins and fixed values for the motor. These vary
         with the inheriting class.
 
         see the example file 'motorset.json'
@@ -336,7 +336,7 @@ class directstepper(basestepper):
         wables=wabledefs+[
             ('drive_enable',    wv.enumWatch,       'disable',      False, {'vlist': ('enable', 'disable')}),
             ('direction',       wv.enumWatch,       'F',            False, {'vlist': ('F','R')}),
-            ('drive_pins',      wv.textWatch,       '17 23 22 27',  False),    # list of the pins in use
+            ('drive_pins',      wv.textWatch,       None,           False),    # list of the pins in use from json file
             ('drive_hold_power',wv.intWatch,        55,             False, {'minv':0, 'maxv':255}),   # power factor used when stationary
         ]
         super().__init__(wabledefs=wables, **kwargs)
@@ -488,7 +488,7 @@ class A4988stepper(basestepper):
     """
     Extends basestepper for A4988 / DRV8825 style stepper driver chips with signals controlled directly by gpio pins.
     """
-    def __init__(self, wabledefs=[], **kwargs):
+    def __init__(self, wabledefs, **kwargs):
         """
         Extends basestepper with specifics to drive step controller chips like A4988 and DRV8825
         """
@@ -637,6 +637,8 @@ class multimotor(wv.watchablepigpio):
             ('mode',        wv.enumWatch,   controllermodes[1], False,  {'vlist': controllermodes}),
             ('gotonow',     wv.btnWatch,    'Action',           False),
             ('wavepulses',  wv.intWatch,    1000,               True,   {'minv':100}),
+            ('max_wave_time', wv.intWatch,  500000,             True,   {'minv': 1000, 'maxv': 1000000}),
+            ('max_waves',   wv.intWatch,    3,                  True,   {'minv':2, 'maxv': 9}),
         ]
         if gpiolog:
             from pigpiolog import plog
@@ -649,7 +651,7 @@ class multimotor(wv.watchablepigpio):
         self.pigpbpw.setValue(self.pio.wave_get_max_cbs(), wv.myagents.app)
         self.motors={}
         for motname, motinfo in self.startsettings.items():
-            newmotor=self.makeChild(defn=(motname, self.classdefs[motinfo['motorclass']], None, False, {'name': motname, 'loglevel': wv.loglvls.DEBUG}), value=self.startsettings.get(motname,{}))
+            newmotor=self.makeChild(defn=(motname, self.classdefs[motinfo['motorclass']], None, False, {'name': motname, 'loglevel': wv.loglvls.INFO}), value=motinfo)
             if newmotor is None:
                 raise ValueError('motor construction failed for %s' % motname)
             self.motors[motname]=newmotor
@@ -733,13 +735,15 @@ class multimotor(wv.watchablepigpio):
             pendingbufs=[]
             buffends=[]
             maxpulses=self.wavepulses.getValue()
-#            logf=open('pulselog.csv','w')
+            maxwaves=self.max_waves.getValue()
+            wavepercent=100//maxwaves
+#            logf=open('wavelog.txt','w')
             logf=None
             while moredata:
-                while len(pendingbufs) < 3 and moredata:
+                while len(pendingbufs) < maxwaves and moredata:
                     nextbuff=[]
                     mposns={}
-                    bufftime=1000000            # count the time and stop adding pulses if we get to 1 second
+                    bufftime=self.max_wave_time.getValue()            # count the time and stop adding pulses if we get to this time
                     while len(nextbuff) < maxpulses:
                         try:
                             nextp=next(mergegen)
@@ -760,43 +764,53 @@ class multimotor(wv.watchablepigpio):
                                 break
                         mposns[thisp[4]]=thisp[3]
                     if len(nextbuff) > 0:
-                        if not logf is None:
-                            for pp in nextbuff:
-                                if pp.delay != 2:
-                                    logf.write('%8x, %8x, %5d\n' % (pp.gpio_on, pp.gpio_off, pp.delay))
+#                        if not logf is None:
+#                            for pp in nextbuff:
+#                                if pp.delay != 2:
+#                                    logf.write('%8x, %8x, %5d\n' % (pp.gpio_on, pp.gpio_off, pp.delay))
                         try:
                             pcount=self.pio.wave_add_generic(nextbuff)
+                            if not logf is None:
+                                logf.write('wave_add_generic - count now %d\n' % pcount)
                         except Exception as ex:
                             '''oh dear we screwed up - let's print the the data we sent'''
                             print('FAIL in wave_add_generic' + str(ex))
                             for i, p in enumerate(nextbuff):
                                 print('%4d: on: %8x, off: %8x, delay: %8d' % (i, p.gpio_on, p.gpio_off, p.delay ))
                             raise
-                        waveid=self.pio.wave_create()
+                        cbcount=self.pio.wave_get_cbs()
+                        waveid=self.pio.wave_create_and_pad(wavepercent)
+                        if not logf is None:
+                            logf.write('wave %d created with %d cbs\n' % (waveid, cbcount))
                         pendingbufs.append(waveid)
                         buffends.append(mposns)
-                        self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, len(nextbuff), self.pio.wave_get_cbs()))
+                        self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, len(nextbuff), cbcount))
                         self.pio.wave_send_using_mode(waveid, pigpio.WAVE_MODE_ONE_SHOT_SYNC)
+                        if not logf is None:
+                            logf.write('wave_send_using_mode_one_shot_sync - %d\n' % (waveid))
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None
                 if len(pendingbufs) > 0:
-                    self._thwaitq(time.time()+.04)
                     current=self.pio.wave_tx_at()
-                    if current == 9999 or pendingbufs.index(current) != 0:
+                    if current == 9999:
+                        self.log(loglvls.WARN,'9999 wave id received')
+                    endposns=None
+                    while current != pendingbufs[0]:
                         donebuf = pendingbufs.pop(0)
                         try:
                             self.pio.wave_delete(donebuf)
+                            if not logf is None:
+                                logf.write('wave %d deleted\n' % donebuf)
                             self.log(loglvls.DEBUG,'wave %d complete, remains: %s' % (donebuf, pendingbufs))
                         except pigpio.error:                            
                             self.log(loglvls.DEBUG,'wave delete failed for wave %d with %s' % (donebuf, pendingbufs))
                         endposns = buffends.pop(0)
+                    if not endposns is None:
                         for mn, mp in endposns.items():
                             self.motors[mn].rawposn.setValue(mp, wv.myagents.app)
-                    elif current == pendingbufs[0]:
-                        pass
-                    else:
-                        self.log(loglvls.DEBUG,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAArg')
+                if len(pendingbufs) >= maxwaves: # check if we have room for another wave right now - if not, wait a bit
+                    self._thwaitq(time.time()+.1)
             if not logf is None:
                 logf.close()
             self.log(loglvls.DEBUG, 'final waves %d' % len(pendingbufs))
@@ -815,7 +829,9 @@ class multimotor(wv.watchablepigpio):
 #                    self.log(loglvls.DEBUG,'wave %d running' % current)
                 else:
                     self.log(loglvls.DEBUG,'BBBBBBBBBBBBBBBBBBBBBBBBBBAArg')
-#            self.pigp.wave_clear()
+#            self.pio.wave_clear()
+        if not logf is None:
+            logf.close()
         self.log(loglvls.INFO, "motoset leaving mode fast")
         for motor in motors.values():
             motor.endstepping()

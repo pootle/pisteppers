@@ -1,5 +1,5 @@
 {
-    "m1": {
+    "a4988m1": {
         "motorclass": "A4988",
         "drive_enable": {
             "pinno": 25,
@@ -19,7 +19,8 @@
         },
         "step": {
             "pinno": 27,
-            "pulsetime": 2
+            "pulsetime": 2,
+            "vlist": [0, 1]
         },
         "usteppins": {
             "pins": [

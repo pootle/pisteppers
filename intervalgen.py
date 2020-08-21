@@ -211,7 +211,7 @@ class stepconstacc(stepgen):
                 recalc=False
             if (isgoto and absoffset  < rampdown) or newdir != currdir or not self.motor.stepactive:
                 if currtps==maxtps:
-                    self.log(loglvls.DEBUG, 'start slow down at', tickpos)
+                    self.log(loglvls.DEBUG, 'start slow down at %d' % tickpos)
                 slope=slopeget()
                 if currtps > starttps:
                     timeleft=((currtps-starttps) / slope)-currtick
@@ -246,7 +246,7 @@ class stepconstacc(stepgen):
                     currtps=starttps
                     recalc=True
                     rampupstart=curtime
-                    self.log(loglvls.DEBUG, 'flipdir at', tickpos)
+                    self.log(loglvls.DEBUG, 'flipdir at %d' % tickpos)
                 elif currtps < starttps:
 #                    print('clamping min speed')
                     curtps=starttps

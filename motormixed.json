@@ -202,5 +202,39 @@
                 "slope"     : 100
             }
         }
+    },
+    "byj": {
+        "motorclass": "ULN",
+        "drive_pins": "6 5 7 8",
+        "stepmodes": {
+            "onespeed": {
+                "stepclass" : "onespeed",
+                "mode"      : "software",
+                "usteplevel": "double",
+                "step"      : 0.1
+            },
+            "constaccel": {
+                "stepclass" : "constramp",
+                "mode"      : "software",
+                "usteplevel": "double",
+                "startstep" : 0.5,
+                "minstep"   : 0.05,
+                "slope"     : 5
+            },
+            "wavetestconst": {
+                "stepclass" : "onespeed",
+                "mode"      : "wave",
+                "usteplevel": "double",
+                "step"      : 0.1
+            },
+            "wavetestramp": {
+                "stepclass" : "constramp",
+                "mode"      : "wave",
+                "usteplevel": "double",
+                "startstep" : 0.03,
+                "minstep"   : 0.002,
+                "slope"     : 100
+            }
+        }
     }
 }

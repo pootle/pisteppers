@@ -38,7 +38,7 @@ httpserverclass = httpbase.httpserver
 # this is the class instantiated to handle each incoming http request
 httprequestclass = httpbase.httprequh
 
-settingsfile = 'motorset.json'  # default motor settings file
+settingsfile = None  # default motor settings file
 
 def setup(settings):
     app1 = stepperweb.webapp(value=settingsfile if settings is None else settings)
@@ -48,7 +48,30 @@ def setup(settings):
     'GET'       : { # all valid GETs and what to do with them. each entry is a 2-tuple, with a keyword used by the httprequest handler to
                             # select how to process the request.
         ''              : ('redirect', '/index.html'),
-        'index.html'    : ('makedynampage', (app1.makeMainPage,{'page':'templates/stepperweb.html'})),
+        'full.html'    : ('makedynampage', (app1.makeMainPage,{
+                'page':         'templates/everything.html', 
+                'topfields':    ('pigpmspw', 'pigpppw', 'pigpbpw', 'mode', 'gotonow', 'max_waves', 'max_wave_time', 'wavepulses'),
+                'motorfields':  {'a4988m1': {'fields':('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn', 
+                                                       'drive_enable', 'direction', 'step', 'holdstopped', 'activestepm'),
+                                             'stepfields': 1},
+                                 'a4988m2': {'fields': ('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn', 
+                                                        'drive_enable', 'direction', 'step', 'holdstopped', 'activestepm'),
+                                             'stepfields': 1},
+                                 'byj':     {'fields': ('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn',
+                                                        'drive_pins', 'holdstopped', 'activestepm'),
+                                             'stepfields': 1},
+                                 }})),
+        'index.html'     : ('makedynampage', (app1.makeMainPage,{
+                'page':         'templates/compact.html', 
+                'topfields':    ('mode', 'gotonow'),
+                'motorfields':  {'a4988m1': {'fields':('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn'),
+                                             'stepfields': 0},
+                                'a4988m2':  {'fields': ('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn'),
+                                             'stepfields': 0},
+                                'byj':     {'fields': ('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn',
+                                                        'drive_pins', 'holdstopped', 'activestepm'),
+                                             'stepfields': 0},
+                                }})),
         'appupdates'       : ('updatestream',  ('serv', 'getupdates')),
         'updateSetting' : ('updatewv', 0),
         },
