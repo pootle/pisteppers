@@ -1,4 +1,4 @@
-import steppers, intervalgen, pagelink
+import steppers, intervalgen , pagelink
 
 from pootlestuff.watchables import myagents
 
@@ -192,22 +192,6 @@ class webstepchipmotor(steppers.A4988stepper, webbasemotor):
         steppers.A4988stepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
         webbasemotor.__init__(self, webdefs=self.allfielddefs)
 
-#unimotorfields=(
-#    (pagelink.wwenum, 'usercmd',    myagents.user,  'next command',    tablefielddropdnhtml,       'next command for this motor'),
-#    (pagelink.wwlink, 'userpos',    myagents.user,  'target position', tablefieldinputhtml,        'target position for next goto command'),
-#    (pagelink.wwenum, 'userdir',    myagents.user,  'direction',       tablefielddropdnhtml,       'direction for next run command'),
-#    (pagelink.wwenum, 'userstepm',  myagents.user,  'step settings',   tablefielddropdnhtml,       'step settings to use for next goto or run command'),
-#    (pagelink.wwenum, 'opmode',     myagents.app,   'motor mode',      tablefielddropdnhtml,       'motor controller mode'),
-#    (pagelink.wwlink, 'targetrawpos',myagents.app, 'target position',  tablefieldinputhtml,        'target absolute position in microsteps'),
-#    (pagelink.wwlink, 'rawposn',    myagents.app,   'current position',tablefieldinputhtml,        
-#            'current absolute position in microsteps (does not vary with changes to microstep level)'),
-#    (pagelink.wwlink, 'holdstopped',myagents.user,  'stop hold time',  tablefieldinputhtml,        
-#            'when motor stops, disable output current after this time (in seconds) - 0 means drive chip stays enabled'),
-#    (pagelink.wwlink, 'activestepm',myagents.app,   'active step mode',tablefielddropdnhtml,       'shows step mode in  use'),
-#    (pagelink.wwlink, 'drive_pins', myagents.NONE,  'pins to chip'    ,tablefieldinputhtml,        'pins used to drive output chip'),
-#)
-
-#unimotorfieldindex={f[1]: f for f in unimotorfields}
 
 class webunimotor(steppers.directstepper, webbasemotor):
     allfielddefs={

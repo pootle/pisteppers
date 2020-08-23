@@ -238,19 +238,30 @@ class basestepper(wv.watchablepigpio):
         tickctr=0
         newpos=self.rawposn.getValue()
         stoppedtimer=None
+        uslevelv, poschange = stepinf.getmicrosteps()
 #        tlf=open('tlog.txt','w')
         tstart=time.time()
         while True:
             try:
-                dirchange, ticktime, newpos = next(tickmaker)
+                ntick=next(tickmaker)
+#                print('stepper got', ntick)
+#                dirchange, ticktime, newpos = next(tickmaker)
             except StopIteration:
                 self.log(loglvls.INFO,'StopIteration!!!!!!!')
                 break
-            if dirchange:
-                print('setting direction to', dirchange)
-                directionset(dirchange, wv.myagents.app)
-            if ticktime is None:
-#                    tlf.write('skip at %7.5f\n' % (time.time()-tstart))
+            if isinstance(ntick, float):
+                if stoppedtimer is None:
+                    steptrig()
+                    newpos += poschange*dirsign
+                else:
+                    self.drive_enable.setValue('enable', wv.myagents.app)
+                    stoppedtimer=None
+                tickctr+=1
+                nextsteptime += ntick
+                if time.time() > posupdatetime:
+                    posnset(newpos, wv.myagents.app)
+                    posupdatetime += .8
+            elif ntick is None:
                 mode=self.opmode.getIndex()
                 if mode==2:  # its a goto - exit
                     self.log(loglvls.INFO,'null tick with goto - completed goto')
@@ -267,19 +278,14 @@ class basestepper(wv.watchablepigpio):
                         self.log(loglvls.INFO, "{} has turned off drive current.".format(self.name))
                         break
             else:
-                if not stoppedtimer is None:
-                    self.drive_enable.setValue('enable', wv.myagents.app)
-                steptrig()
-#                    tlf.write('step at %7.5f\n' % (time.time()-tstart))
-                stoppedtimer=None
-                tickctr+=1
-                nextsteptime += ticktime
-            if time.time() > posupdatetime:
-                posnset(newpos, wv.myagents.app)
-                posupdatetime += .8
+                dirsign=1 if ntick[0]=='F' else -1
+#                print('set dir' , ntick[0])
+                directionset(ntick[0], wv.myagents.app)
+                nextsteptime += ntick[1]
             delay=nextsteptime - time.time()
             if delay > 0:
                 time.sleep(delay)
+#                print('sleeping', delay)
             else:
                 self.overrunctr+=1
                 self.overruntime+=-delay
@@ -450,29 +456,26 @@ class directstepper(basestepper):
             stepbits.append((onb,offb))
         self.tickgenactive=True
         self.stepactive=True
-        tickmaker=stepdef.tickgen(command,self.rawposn.getValue())
+        newpos=self.rawposn.getValue()
+        tickmaker=stepdef.tickgen(command,newpos)
+        uslevelv, poschange = stepdef.getmicrosteps()
         usclock=0
         overflow=0.0
         startup=True
         while True:
             try:
-                dirchange, ticktime, newpos = next(tickmaker)
+                tickspec=next(tickmaker)
+#                dirchange, ticktime, newpos = next(tickmaker)
             except StopIteration:
                 break
-            if ticktime is None:
+            if tickspec is None:
                 self.log(loglvls.INFO,'Null pulse - we are done')
                 break
-#                delay, overflow = (None, 0)
-            else:
-                delay, overflow=divmod(ticktime*1000000+overflow,1)
-            if not dirchange is None:
-                tabinc=1 if dirchange=='F' else -1
-            yield stepbits[self.stepindex] + (usclock, newpos, self.name)
-            if delay is None:
-                break
-            else:
+            elif isinstance(tickspec, float):
+                delay, overflow=divmod(tickspec*1000000+overflow,1)
+                newpos += tabinc * poschange
+                yield stepbits[self.stepindex] + (usclock, newpos, self.name)
                 usclock += int(delay)
-            try:
                 if tabinc > 0:
                     self.stepindex += 1
                     if self.stepindex >= len(pinbits):
@@ -481,8 +484,11 @@ class directstepper(basestepper):
                     self.stepindex -= 1
                     if self.stepindex < 0:
                         self.stepindex = len(pinbits)-1
-            except:
-                print('oooopsy ---------------', dirchange, ticktime, newpos)
+            else:
+                tabinc=1 if tickspec[0]=='F' else -1
+                delay, overflow=divmod(tickspec[1]*1000000+overflow,1)
+                yield (0,0) + (usclock, newpos, self.name)
+                usclock += int(delay)
 
 class A4988stepper(basestepper):
     """
@@ -557,7 +563,9 @@ class A4988stepper(basestepper):
         dirbit=1<<dirvar.pinno
         self.tickgenactive=True
         stepdef.running=True
-        tickmaker=stepdef.tickgen(command, self.rawposn.getValue())
+        newpos=self.rawposn.getValue()
+        tickmaker=stepdef.tickgen(command,newpos)
+        uslevelv, poschange = stepdef.getmicrosteps()
         stepvar=self.step
         pulselen=stepvar.pulsetime
         stepa=1<<stepvar.pinno if stepvar.vlist[0] == 0 else 0
@@ -571,40 +579,69 @@ class A4988stepper(basestepper):
         startup=True
         while True:
             try:
-                dirchange, ticktime, newpos = next(tickmaker)
+                tickspec=next(tickmaker)
+#                dirchange, ticktime, newpos = next(tickmaker)
             except StopIteration:
                 delay, overflow = (None, 0)
                 break
-            if ticktime is None:
-                delay, overflow = (None, 0)
+            if tickspec is None:
+                delay, overflow = (None, 0)                
+                break
+            elif isinstance(tickspec, float):
+                delay, overflow=divmod(tickspec*1000000+overflow,1)
+                newpos += dirmult*poschange
+                pulseon[2]=usclock
+                pulseon[3]=newpos
+                yield pulseon
+                pulseoff[2]=usclock + pulselen
+                pulseoff[3]=newpos
+                yield pulseoff
+                usclock += int(delay)
             else:
-                delay, overflow=divmod(ticktime*1000000+overflow,1)
-            if dirchange:
-                dirbits=setdir[dirchange]
+                dirmult = 1 if tickspec[0] == 'F' else -1
+                print('dirset', tickspec[0],dirmult)
+                dirbits=setdir[tickspec[0]]
                 if startup:
                     driveenbits=self.drive_enable.getBits('enable')
                     mslevelbits=self.usteppins.pinbits(stepdef.usteplevel.getValue())
                     dirbits = (dirbits[0] | driveenbits[0] | mslevelbits[0], dirbits[1] | driveenbits[1] | mslevelbits[1])
                     startup=False
                 yield (dirbits[0], dirbits[1], usclock, newpos, self.name) # setup all the control pins and wait a mo
-                pulseon[2]=usclock+1
-                pulseon[3]=newpos
-                yield pulseon
-                pulseoff[2]=usclock + 1 + pulselen
-                pulseoff[3]=newpos
-            else:
-                pulseon[2]=usclock
-                pulseon[3]=newpos
-                yield pulseon
-                pulseoff[2]=usclock + pulselen
-                pulseoff[3]=newpos
-#            print('d', pulseoff[2])
-            yield pulseoff
-            if delay is None:
-                usclock += pulselen
-                break
-            else:
+                delay, overflow=divmod(tickspec[1]*1000000+overflow,1)
                 usclock += int(delay)
+
+
+#            if ticktime is None:
+#                delay, overflow = (None, 0)
+#            else:
+#                delay, overflow=divmod(ticktime*1000000+overflow,1)
+#            if dirchange:
+#                dirmult = 1 if dirchange == 'F' else -1
+#                dirbits=setdir[dirchange]
+#                if startup:
+#                    driveenbits=self.drive_enable.getBits('enable')
+#                    mslevelbits=self.usteppins.pinbits(stepdef.usteplevel.getValue())
+#                    dirbits = (dirbits[0] | driveenbits[0] | mslevelbits[0], dirbits[1] | driveenbits[1] | mslevelbits[1])
+#                    startup=False
+#                yield (dirbits[0], dirbits[1], usclock, newpos, self.name) # setup all the control pins and wait a mo
+#                pulseon[2]=usclock+1
+#                pulseon[3]=newpos
+#                yield pulseon
+#                pulseoff[2]=usclock + 1 + pulselen
+#                pulseoff[3]=newpos
+#            else:
+#                pulseon[2]=usclock
+#                pulseon[3]=newpos
+#                yield pulseon
+#                pulseoff[2]=usclock + pulselen
+#                pulseoff[3]=newpos
+#            print('d', pulseoff[2])
+#            yield pulseoff
+#            if delay is None:
+#                usclock += pulselen
+#                break
+#            else:
+#                usclock += int(delay)
         holdtime=self.holdstopped.getValue()
         holddelay=100 if holdtime ==0 else int(round(holdtime*1000000))
         disbits=self.drive_enable.getBits('disable')

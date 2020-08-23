@@ -55,6 +55,15 @@ class stepgen(wv.watchablesmart):
     def log(self, *args, **kwargs):
         self.motor.log(*args, **kwargs)
 
+    def getmicrosteps(self):
+        """
+        returns a 2 tuple:
+            0: number of microsteps per step for the microsteplevel 
+            1: position change per actual tick
+        """
+        uslevelv = self.motor.getusteplevel(self.usteplevel.getValue())# number of microsteps per step
+        return uslevelv, self.motor.maxstepfactor // uslevelv
+
     def tickgen(self):
         raise NotImplementedError()
 
@@ -73,63 +82,63 @@ class stepgensimple(stepgen):
         """
         generator function for step times.
         
-        yields a sequence of 3-tuples until target is reached, at which point it returns None for the time interval.
+        yields a sequence of values until target is reached, at which point it returns None for the time interval.
         This function keeps it's own time so can generate ticks independent of actual time - the caller must sync
         to a clock if required.
         
-        command: 'run' or 'goto'.  run only terminates if the class variable running is set False.
+        command: 'run' or 'goto'.  run only terminates if the motor's stepactive variable is set False.
                                    goto will return no step required once target is reached, and terminate if running set False
         
         initialpos: starting position to use returned positions are all relative to this value
         
-        each tuple is:
-            0 : None if direction is unchanged, else 'F' or 'R'
-            1 : time in seconds to the next step - None if no step required (e.g. at target pos)
-            2 : raw position after this step is issued
+        returns:
+            when changing direction this returns a 2 - tuple
+                0: 1 character string: 'F' or 'R'
+                1: time to next step (this will be 2* normal interval)
+                
+            otherwise this returns a single (float) value of time to next step (or None if no step is required)
         """
         if self.ticklogf is None:
             tlog=None
         else:
             tlog=open(self.ticklogf,'w')
         isgoto=command=='goto'                              # goto or move?
-        uslevelv = self.motor.getusteplevel(self.usteplevel.getValue())# number of microsteps per step
-        usteps=self.motor.maxstepfactor // uslevelv         # position change per actual tick
+        uslevelv, usteps = self.getmicrosteps()
         tickget= self.step.getValue                         # time for full step - needs scaled to account for microstepping
         currentposv=initialpos                              # get the current position - we assume we are in control of this so don't re-read it
         activedirection=None                                # which direction motor currently running
         if isgoto:
             targetposget= self.motor.targetrawpos.getValue  # target position when in goto mode
-            print('target: %d, usteps: %d' % (targetposget(), usteps))
             while self.motor.stepactive:
                 movesteps=targetposget()-currentposv
                 if abs(movesteps) < usteps:                     # if remaining usteps less than the current step size stop now
                     self.log(loglvls.INFO, 'at target pos')
-                    yield None, None, currentposv
+                    yield None
                     if tlog:
                         tlog.write('X,0,%d\n' % currentposv)
                     currenttick=None
                 else:
                     newdir='F' if movesteps > 0 else 'R'
                     if newdir != activedirection:
-                        setdir = newdir
                         activedirection=newdir
+                        currentposv += usteps if activedirection =='F' else -usteps
+                        yield newdir, 2 * tickget()/uslevelv
+                        if tlog:
+                            tlog.write('%s,%7.5f,%d\n' % (' ' if setdir is None else setdir, tickget()/uslevelv, currentposv))
                     else:
-                        setdir = None
-                    currentposv += usteps if activedirection =='F' else -usteps
-                    yield setdir, tickget()/uslevelv, currentposv
-                    if tlog:
-                        tlog.write('%s,%7.5f,%d\n' % (' ' if setdir is None else setdir, tickget()/uslevelv, currentposv))
+                        currentposv += usteps if activedirection =='F' else -usteps
+                        yield tickget()/uslevelv
+                        if tlog:
+                            tlog.write('%s,%7.5f,%d\n' % (' ' if setdir is None else setdir, tickget()/uslevelv, currentposv))
         else:
             targetdirget=self.motor.target_dir.getValue         # and the target dir when in run mode (-ve for reverse)
             while self.motor.stepactive:
                 newdir = 'F' if targetdirget() > 0 else 'Z'
                 if newdir != activedirection:
-                    setdir = newdir
                     activedirection=newdir
+                    yield newdir, 2 * tickget()/uslevelv
                 else:
-                    setdir = None
-                currentposv += usteps if activedirection =='F' else -usteps
-                yield setdir, tickget()/uslevelv, currentposv
+                    yield tickget()/uslevelv
         if tlog:
             tlog.close()
 
@@ -150,8 +159,7 @@ class stepconstacc(stepgen):
 
     def tickgen(self, command, initialpos):
         isgoto=command=='goto'                              # goto or move?
-        uslevelv = self.motor.getusteplevel(self.usteplevel.getValue())# number of microsteps in this mode
-        usteps=self.motor.maxstepfactor // uslevelv         # position change per actual tick
+        uslevelv, usteps = self.getmicrosteps()
         startstepget = self.startstep.getValue
         minstepget   = self.minstep.getValue
         slopeget     = self.slope.getValue
@@ -170,46 +178,39 @@ class stepconstacc(stepgen):
             targetget= self.motor.targetrawpos.getValue
             target=targetget()
             offset=target-tickpos
-            absoffset=abs(offset)
             currdir = 1 if offset > 0 else -1
+            absoffset=abs(offset)
         else:
             dirget=self.motor.target_dir.getValue 
             currdir = 1 if dirget() > 0 else -1
-        dflag='F' if currdir > 0 else 'R'
+#        print('KKKKKKKKKKKKKKKK', 'F' if currdir == 1 else 'R', startstepget()/uslevelv)
+        yield 'F' if currdir == 1 else 'R', startstepget()/uslevelv
         if self.ticklogf is None:
             tlog=None
         else:
             tlog=open(self.ticklogf,'w')
         while (isgoto and absoffset > 0) or not isgoto:
-            tickpos += currdir*usteps
             if isgoto:
-                absoffset -=usteps
-            ustick=currtick/uslevelv
-            if tlog:
-                tlog.write('A: %s,%7.5f,%d\n' % (' ' if dflag is None else dflag, ustick, tickpos))
-            yield dflag, ustick, tickpos
-            if tlog:
-                tlog.write('A: %s,%7.5f,%d\n' % (' ' if dflag is None else dflag, ustick, tickpos))
-            dflag=None
-            curtime += ustick
-            if isgoto:
-                if target != targetget():   
+                if target != targetget():
+                    target=targetget()
                     recalc=True
             else:
                 checkdir=1 if dirget() > 0 else -1
                 recalc=currdir!= checkdir
             if recalc:
                 if isgoto:
-                    offset=targetget()-tickpos
+                    offset=target-tickpos
                     newdir, absoffset = (1, offset ) if offset > 0 else (-1 , -offset)
                     rampdown=usteps*bothrampticks//2 if absoffset > usteps*bothrampticks else (absoffset+2.5)//2
+#                    print('brt', bothrampticks, 'test', absoffset > usteps*bothrampticks, 'result', rampdown)
                     rampupstart=curtime
-                    print('rampdown', rampdown, 'offset', offset, 'bothramps', bothrampticks)
-#                    self.log(loglvls.DEBUG, 'predicted - ramp time:  %7.5f   ramp ticks: %5d' % (ramptime, usteps*bothrampticks/2))
                 else:
                     newdir = 1 if dirget() > 0 else -1
                 recalc=False
-            if (isgoto and absoffset  < rampdown) or newdir != currdir or not self.motor.stepactive:
+            else:
+                absoffset=abs(target-tickpos)
+            if (isgoto and absoffset  < rampdown) or newdir != currdir or not self.motor.stepactive: # we need to slow down
+#                print('slowing')
                 if currtps==maxtps:
                     self.log(loglvls.DEBUG, 'start slow down at %d' % tickpos)
                 slope=slopeget()
@@ -217,29 +218,30 @@ class stepconstacc(stepgen):
                     timeleft=((currtps-starttps) / slope)-currtick
                     currtps=starttps+timeleft*slope
                 else:
+                    if not self.motor.stepactive:
+                        break
                     currtps = starttps      # if we end up slower than starttps, clamp to starttps
                 if newdir != currdir and currtps<=starttps:
-#                    print('slow down and change dir')
+                    print('slow down and change dir')
                     tickpos += currdir*usteps
                     currtick=1/currtps
                     ustick=currtick/uslevelv
-                    yield None, ustick, tickpos
+#                    print('yyyyyyyyyyyyyyyy', ustick)
+                    yield ustick
                     if tlog:
                         tlog.write('B: %s,%7.5f,%d\n' % (' ' , ustick, tickpos))
                     curtime += ustick
                     tickpos += currdir*usteps
                     fliptick=startstepget()/uslevelv
-                    if fliptick < 0:
-                        x = 17/0
-                    yield None, fliptick, tickpos
+#                    print('AAAAAAAAAAAAAAAAA', fliptick)
+                    yield fliptick
                     if tlog:
                         tlog.write('C: %s,%7.5f,%d\n' % (' ' , fliptick, tickpos))
                     curtime += fliptick
                     currdir=newdir
                     tickpos += currdir*usteps
-                    if fliptick < 0:
-                        x = 17/0
-                    yield 'F' if currdir > 0 else 'R',fliptick, tickpos
+#                    print('oooooooooooooo','F' if currdir > 0 else 'R',fliptick * 2)
+                    yield 'F' if currdir > 0 else 'R',fliptick * 2
                     if tlog:
                         tlog.write('D: %s,%7.5f,%d\n' % ('F' if currdir > 0 else 'R' , fliptick, tickpos))
                     curtime += fliptick
@@ -254,17 +256,18 @@ class stepconstacc(stepgen):
                     if not self.motor.stepactive:
                         break
             elif currtps<maxtps:
-#                print('speeding up')
                 currtps = starttps+(curtime-rampupstart)*slopeget()
+#                print('speeding up', currtps, curtime, rampupstart, slopeget())
                 if currtps > maxtps:
                     self.log(loglvls.DEBUG, 'clamp to %7.5f at tick %d'% (maxtps, tickpos))
                     currtps=maxtps
-                    print('max speed reached')
+#                    print('max speed reached at', tickpos)
             else:
-#                print('carry on at current speed')
                 pass
             currtick=1/currtps
-        yield None, currtick/uslevelv, tickpos
+            yield currtick/uslevelv
+            curtime += currtick
+            tickpos += currdir*usteps
         if tlog:
             tlog.write('%s,%7.5f,%d\n' % ('X' if currdir > 0 else 'R' , currtick/uslevelv, tickpos))
             tlog.close()
