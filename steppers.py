@@ -776,55 +776,77 @@ class multimotor(wv.watchablepigpio):
             wavepercent=100//maxwaves
 #            logf=open('wavelog.txt','w')
             logf=None
+            sentbuffs=[]
+            savedbuffs=[]
             while moredata:
                 while len(pendingbufs) < maxwaves and moredata:
-                    nextbuff=[]
                     mposns={}
                     bufftime=self.max_wave_time.getValue()            # count the time and stop adding pulses if we get to this time
-                    while len(nextbuff) < maxpulses:
+                    if len(savedbuffs) > 0:
+                        nextbuff=savedbuffs.pop(0)
+                    else:
+                        nextbuff=[]
+                    nextbuffi = 0
+                    while nextbuffi < maxpulses:
                         try:
                             nextp=next(mergegen)
                         except StopIteration:
                             nextp=None
                         if nextp is None:
-                            nextbuff.append(pigpio.pulse(thisp[0], thisp[1], 1))
+                            if len(nextbuff) <= nextbuffi:
+                                nextbuff.append(pigpio.pulse(thisp[0], thisp[1], 1))
+                            else:
+                                rebuff = nextbuff[nextbuffi]
+                                rebuff.gpio_on=thisp[0]
+                                rebuff.gpio_off=thisp[1]
+                                rebuff.delay=1
+                            nextbuffi += 1
                             moredata=False
                             thisp=nextp
                             break
                         else:
                             dtime=nextp[2]-thisp[2]
                             assert dtime >= 0
-                            nextbuff.append(pigpio.pulse(thisp[0], thisp[1], dtime))
+                            if len(nextbuff) <= nextbuffi:
+                                nextbuff.append(pigpio.pulse(thisp[0], thisp[1], dtime))
+                            else:
+                                rebuff = nextbuff[nextbuffi]
+                                rebuff.gpio_on=thisp[0]
+                                rebuff.gpio_off=thisp[1]
+                                rebuff.delay= dtime
+                            nextbuffi += 1
                             thisp=nextp
                             bufftime -= dtime
                             if bufftime <= 0:
                                 break
                         mposns[thisp[4]]=thisp[3]
-                    if len(nextbuff) > 0:
+                    if nextbuffi > 0:
 #                        if not logf is None:
-#                            for pp in nextbuff:
+#                            for pp in nextbuff[:nextbuffi]:
 #                                if pp.delay != 2:
 #                                    logf.write('%8x, %8x, %5d\n' % (pp.gpio_on, pp.gpio_off, pp.delay))
                         try:
-                            pcount=self.pio.wave_add_generic(nextbuff)
+                            pcount=self.pio.wave_add_generic(nextbuff[:nextbuffi])
                             if not logf is None:
                                 logf.write('wave_add_generic - count now %d\n' % pcount)
                         except Exception as ex:
                             '''oh dear we screwed up - let's print the the data we sent'''
                             print('FAIL in wave_add_generic' + str(ex))
-                            for i, p in enumerate(nextbuff):
+                            for i, p in enumerate(nextbuff[:nextbuffi]):
                                 print('%4d: on: %8x, off: %8x, delay: %8d' % (i, p.gpio_on, p.gpio_off, p.delay ))
                             raise
                         cbcount=self.pio.wave_get_cbs()
                         waveid=self.pio.wave_create_and_pad(wavepercent)
                         if not logf is None:
                             logf.write('wave %d created with %d cbs\n' % (waveid, cbcount))
+                        sentbuffs.append(nextbuff)
                         pendingbufs.append(waveid)
                         buffends.append(mposns)
-                        self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, len(nextbuff), cbcount))
+                        self.log(loglvls.DEBUG,'wave %d, duration %7.5f, size %d, cbs: %d' % (waveid, self.pio.wave_get_micros()/1000000, nextbuffi, cbcount))
                         self.pio.wave_send_using_mode(waveid, pigpio.WAVE_MODE_ONE_SHOT_SYNC)
                         if not logf is None:
                             logf.write('wave_send_using_mode_one_shot_sync - %d\n' % (waveid))
+                        nextbuffi = 0
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None
@@ -842,7 +864,9 @@ class multimotor(wv.watchablepigpio):
                             self.log(loglvls.DEBUG,'wave %d complete, remains: %s' % (donebuf, pendingbufs))
                         except pigpio.error:                            
                             self.log(loglvls.DEBUG,'wave delete failed for wave %d with %s' % (donebuf, pendingbufs))
+                            raise
                         endposns = buffends.pop(0)
+                        savedbuffs.append(sentbuffs.pop(0))
                     if not endposns is None:
                         for mn, mp in endposns.items():
                             self.motors[mn].rawposn.setValue(mp, wv.myagents.app)

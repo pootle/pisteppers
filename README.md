@@ -1,7 +1,7 @@
 # pisteppers
 Code to drive stepper motors from a raspberry pi with good performance and minimal extra hardware.
 
-This code optioanlly uses pigpio waves to drive gpio pins allowinf precise timings.
+This code optioanlly uses pigpio waves to drive gpio pins for precise timings.
 
 It is set up to drive steppers through a basic controller such as a Pololu A4988 chip or for unipolar motors via (for example ULN2003).
 
