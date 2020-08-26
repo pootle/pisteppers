@@ -50,7 +50,7 @@ def setup(settings):
         ''              : ('redirect', '/index.html'),
         'full.html'    : ('makedynampage', (app1.makeMainPage,{
                 'page':         'templates/everything.html', 
-                'topfields':    ('pigpmspw', 'pigpppw', 'pigpbpw', 'mode', 'gotonow', 'max_waves', 'max_wave_time', 'wavepulses'),
+                'topfields':    ('pigpmspw', 'pigpppw', 'pigpbpw', 'mode', 'max_waves', 'max_wave_time', 'wavepulses', 'gotonow'),
                 'motorfields':  {'a4988m1': {'fields':('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn', 
                                                        'drive_enable', 'direction', 'step', 'holdstopped', 'activestepm'),
                                              'stepfields': 1},

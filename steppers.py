@@ -59,11 +59,13 @@ class basestepper(wv.watchablepigpio):
        
     close:  close the motor down - it cannot be used again once closed
     
-    stop:   stop the motor - if it is running in will stop in a controlled manner
+    stop:   stop the motor - if it is running in will stop in a controlled manner and the op mode will revert to stopped
     
-    goto:   the motor will travel to the target position
+    goto:   the motor will travel to the target position and then monitor target position for change until stop is requested.
     
-    run:    the motor will run at the target speed until stop is requested
+    onegoto:the motor will travel to the target position and then revert to stopped.
+    
+    run:    the motor will run at the target speed and in the target direction until stop is requested
 
     The motor can be in 1 of a number of (operation) modes. These are set by the motor and show the current state.
     -------------------------------------------------------
@@ -85,7 +87,7 @@ class basestepper(wv.watchablepigpio):
     
     opmodes= ('closed', 'stopped', 'softrun', 'dmarun')
 
-    commands=('none', 'close', 'stop', 'goto', 'run')
+    commands=('none', 'close', 'stop', 'goto', 'run', 'onegoto')
 
     def __init__(self, name, app, value, wabledefs=[], **kwargs):
         """
@@ -116,7 +118,7 @@ class basestepper(wv.watchablepigpio):
             rmodes.append(smode)
         self.stepmodenames=rmodes
         wables=wabledefs+[
-            ('userstepm',   wv.enumWatch,   rmodes[0],          False,  {'vlist': rmodes}),         # available stepping modes - belongs in web part, but needs rmodes...
+            ('userstepm',   wv.enumWatch,   rmodes[0],          False,  {'vlist': rmodes}),         # available stepping modes - used by the gui, but needs rmodes...
             ('targetrawpos',wv.intWatch,    0,                  False),                             # target position for goto
             ('target_dir',  wv.intWatch,    1,                  False),                             # target direction for run - +ve for fwd, -ve for reverse
             ('opmode',      wv.enumWatch,   self.opmodes[1],    False,  {'vlist': self.opmodes}),   # what mode is current - set by the motor
@@ -141,12 +143,12 @@ class basestepper(wv.watchablepigpio):
         if curmode=='closed':
             return None
         assert command in self.commands
-        if command in ('goto', 'run'):
+        if command in ('goto', 'onegoto', 'run'):
             if curmode == 'stopped':
                 assert stepmode in self.userstepm.vlist
                 if command == 'run':
                     assert targetdir in ('fwd','rev')
-                if command == 'goto':
+                if command == 'goto' or command == 'onegoto':
                     assert isinstance(targetpos, (int,float))
                 stepdef=getattr(self.stepmodes, stepmode)
                 if stepdef.mode=='software':
@@ -166,22 +168,15 @@ class basestepper(wv.watchablepigpio):
             else:
                 if not targetpos is None:
                     self.targetrawpos.setValue(targetpos, wv.myagents.app)                  # these 2 are monitored by the stepgenerator
-                if not targetdir is None:
-                    self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app)
-                
+                if not targetdir is None:                                                   # other changed values in the step generator settings
+                    self.target_dir.setValue(1 if targetdir=='fwd' else -1,wv.myagents.app) # are picked up directly in the generator 
+                self.updatetickerparams=True
         elif command=='close' or command=='stop':
             curmode=self.opmode.getValue()
             if curmode=='stopped' or curmode=='closed':
                 self.drive_enable.setValue('disable', wv.myagents.app)
             elif curmode=='softrun' or curmode=='dmarun':
-                print('tell ticker to stop')
                 self.stepactive=False
-        elif command != 'none':
-            print('putting', command)
-            self.cmndq.put_nowait((self._command, {'command': command, 'targetpos': targetpos, 'targetdir': targetdir, 'stepmode': stepmode}))
-            if command in ('goto', 'run'):
-                mo = getattr(self.stepmodes,stepmode).mode
-                return mo        
         return None
 
     def fastgoto(self, stepmode, **kwargs):
@@ -244,8 +239,6 @@ class basestepper(wv.watchablepigpio):
         while True:
             try:
                 ntick=next(tickmaker)
-#                print('stepper got', ntick)
-#                dirchange, ticktime, newpos = next(tickmaker)
             except StopIteration:
                 self.log(loglvls.INFO,'StopIteration!!!!!!!')
                 break
@@ -262,37 +255,27 @@ class basestepper(wv.watchablepigpio):
                     posnset(newpos, wv.myagents.app)
                     posupdatetime += .8
             elif ntick is None:
-                mode=self.opmode.getIndex()
-                if mode==2:  # its a goto - exit
-                    self.log(loglvls.INFO,'null tick with goto - completed goto')
+                if command == 'onegoto':
+                    print('wave goodbyr')
                     break
-                nextsteptime += .05
-                if stoppedtimer is None:
-                    holdtime=self.holdstopped.getValue()
-                    if holdtime > 0:
-                        stoppedtimer=time.time()+holdtime
                 else:
-                    if time.time() > stoppedtimer:
-                        self.drive_enable.setValue('disable', wv.myagents.app)
-                        stoppedtimer += 1000
-                        self.log(loglvls.INFO, "{} has turned off drive current.".format(self.name))
-                        break
+                    nextsteptime += .05  #  If nothing to do just wait for a bit and go round again
+                    if time.time() > posupdatetime:
+                        posnset(newpos, wv.myagents.app)
+                        posupdatetime += .8
             else:
                 dirsign=1 if ntick[0]=='F' else -1
-#                print('set dir' , ntick[0])
                 directionset(ntick[0], wv.myagents.app)
                 nextsteptime += ntick[1]
             delay=nextsteptime - time.time()
             if delay > 0:
                 time.sleep(delay)
-#                print('sleeping', delay)
             else:
                 self.overrunctr+=1
                 self.overruntime+=-delay
 #        tlf.close()
         self.log(loglvls.INFO, "%s _slowrun complete, now at %s, %d overruns of %d ticks, total overrun: %7.3f." % (self.name, newpos, self.overrunctr, tickctr, self.overruntime))
-        if not newpos is None:
-             posnset(newpos, wv.myagents.app)
+        posnset(newpos, wv.myagents.app)
         self.endstepping()
         self.log(loglvls.INFO, self.reporttimelog('softrun'))
 
@@ -609,39 +592,6 @@ class A4988stepper(basestepper):
                 yield (dirbits[0], dirbits[1], usclock, newpos, self.name) # setup all the control pins and wait a mo
                 delay, overflow=divmod(tickspec[1]*1000000+overflow,1)
                 usclock += int(delay)
-
-
-#            if ticktime is None:
-#                delay, overflow = (None, 0)
-#            else:
-#                delay, overflow=divmod(ticktime*1000000+overflow,1)
-#            if dirchange:
-#                dirmult = 1 if dirchange == 'F' else -1
-#                dirbits=setdir[dirchange]
-#                if startup:
-#                    driveenbits=self.drive_enable.getBits('enable')
-#                    mslevelbits=self.usteppins.pinbits(stepdef.usteplevel.getValue())
-#                    dirbits = (dirbits[0] | driveenbits[0] | mslevelbits[0], dirbits[1] | driveenbits[1] | mslevelbits[1])
-#                    startup=False
-#                yield (dirbits[0], dirbits[1], usclock, newpos, self.name) # setup all the control pins and wait a mo
-#                pulseon[2]=usclock+1
-#                pulseon[3]=newpos
-#                yield pulseon
-#                pulseoff[2]=usclock + 1 + pulselen
-#                pulseoff[3]=newpos
-#            else:
-#                pulseon[2]=usclock
-#                pulseon[3]=newpos
-#                yield pulseon
-#                pulseoff[2]=usclock + pulselen
-#                pulseoff[3]=newpos
-#            print('d', pulseoff[2])
-#            yield pulseoff
-#            if delay is None:
-#                usclock += pulselen
-#                break
-#            else:
-#                usclock += int(delay)
         holdtime=self.holdstopped.getValue()
         holddelay=100 if holdtime ==0 else int(round(holdtime*1000000))
         disbits=self.drive_enable.getBits('disable')
@@ -855,7 +805,7 @@ class multimotor(wv.watchablepigpio):
                     if current == 9999:
                         self.log(loglvls.WARN,'9999 wave id received')
                     endposns=None
-                    while current != pendingbufs[0]:
+                    while len(pendingbufs) > 0  and current != pendingbufs[0]:
                         donebuf = pendingbufs.pop(0)
                         try:
                             self.pio.wave_delete(donebuf)

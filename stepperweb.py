@@ -119,6 +119,13 @@ class webapp(steppers.multimotor):
         if fastmotors:
             self.runfast(fastmotors)
 
+    def multiupdate(self, oldValue, newValue, agent, watched):
+        """
+        Button for user to cause all parameter values to be updated
+        """
+        for motor in self.motors.values():
+            motor.updatetickerparams=True
+
 class webgroup():
     def __init__(self, webdefs, prefix=''):
         self.webdefs=webdefs
@@ -211,16 +218,16 @@ class webunimotor(steppers.directstepper, webbasemotor):
         steppers.directstepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
         webbasemotor.__init__(self, webdefs=self.allfielddefs)
 
-class webstepsimple(intervalgen.stepgensimple, webgroup):
+class websteponespeed(intervalgen.stepgenonespeed, webgroup):
     def __init__(self, **kwargs):
-        intervalgen.stepgensimple.__init__(self, **kwargs)
+        intervalgen.stepgenonespeed.__init__(self, **kwargs)
         sfi={'stephead': (pagelink.wwdummy,'settings',   myagents.NONE,   'stepper settings',       tablefieldstatic,           None, {'value':self.name}),}
         sfi.update(stepfieldssimplex)
         webgroup.__init__(self, webdefs=sfi, prefix=self.name)
 
 stepfieldssimple=(   
     (pagelink.wwenum, 'usteplevel', myagents.user,  'microstep level',          tablefielddropdnhtml,       'microsteplevel used'),
-    (pagelink.wwlink, 'step',       myagents.user,  'step interval',            tablefieldinputhtml,        'step interval in seconds'),
+    (pagelink.wwlink, 'steprate',   myagents.user,  'steps per second',         tablefieldinputhtml,        'number of full steps per second'),
 )
 stepfieldssimplex={f[1]: f for f in stepfieldssimple}
 
@@ -233,15 +240,15 @@ class webstepconstacc(intervalgen.stepconstacc, webgroup):
 
 sfconstacc=(
     (pagelink.wwenum, 'usteplevel', myagents.user,  'microstep level',          tablefielddropdnhtml,       'microsteplevel used'),
-    (pagelink.wwlink, 'startstep',  myagents.user,  'start step',               tablefieldinputhtml,        'initial step interval in seconds'),
-    (pagelink.wwlink, 'minstep',    myagents.user,  'fastest step',             tablefieldinputhtml,        'minimum step interval in seconds'),
-    (pagelink.wwlink, 'slope',      myagents.user,  'slope',                    tablefieldinputhtml,        'acceleration factor'),
+    (pagelink.wwlink, 'slowtps',    myagents.user,  'start / stop tps',         tablefieldinputhtml,        'initial / final steps per second seconds'),
+    (pagelink.wwlink, 'fasttps',    myagents.user,  'fastest step rate',        tablefieldinputhtml,        'max speed in full steps per second'),
+    (pagelink.wwlink, 'slope',      myagents.user,  'slope',                    tablefieldinputhtml,        'acceleration factor - steps per second per second'),
 )
 stepfieldsconstacc={f[1]: f for f in sfconstacc}
 
 classlookups = {  # maps the class names in json settings file to actual classes
     'ULN'       : webunimotor,
     'A4988'     : webstepchipmotor,
-    'onespeed'  : webstepsimple,
+    'onespeed'  : websteponespeed,
     'constramp' : webstepconstacc,
 }
