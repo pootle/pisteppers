@@ -19,8 +19,7 @@
         },
         "step": {
             "pinno": 27,
-            "pulsetime": 2,
-            "vlist": [0, 1]
+            "pulsetime": 2
         },
         "usteppins": {
             "pins": [
@@ -52,53 +51,53 @@
                 "stepclass" : "onespeed",
                 "mode"      : "software",
                 "usteplevel": "1/4",
-                "step"      : 0.1
+                "steprate"  : 1
             },
             "softramp": {
                 "stepclass" : "constramp",
                 "mode"      : "software",
                 "usteplevel": "half",
-                "minstep"   : 0.004,
-                "startstep" : 0.008,
-                "slope"     : 800
+                "slowtps"   : 1,
+                "fasttps"   : 2,
+                "slope"     : 0.1
             },
             "dmaone": {
                 "stepclass" : "onespeed",
-                "mode"      :"wave",
+                "mode"      : "wave",
                 "usteplevel": "1/8",
-                "step"      : 0.1
+                "steprate"  : 10
             },
             "dmaramp": {
                 "stepclass" : "constramp",
-                "mode"      :"wave",
+                "mode"      : "wave",
                 "usteplevel": "single",
-                "minstep"   : 0.0015    ,
-                "startstep" : 0.004,
-                "slope"     : 25
+                "slowtps"   : 10,
+                "fasttps"   : 100,
+                "slope"     : 20
             },
             "dmamaxfull": {
                 "stepclass" : "constramp",
-                "mode"      :"wave",
+                "mode"      : "wave",
                 "usteplevel": "single",
-                "minstep"   : 0.0018,
-                "startstep" : 0.004,
-                "slope"     : 100
+                "slowtps"   : 120,
+                "fasttps"   : 550,
+                "slope"     : 90
             },
             "dmamaxhalf": {
                 "stepclass" : "constramp",
                 "mode"      :"wave",
                 "usteplevel": "half",
-                "minstep"   : 0.0012,
-                "startstep" : 0.005,
-                "slope"     : 100
+                "slowtps"   : 150,
+                "fasttps"   : 825,
+                "slope"     : 120
             },
             "dmamaxquart": {
                 "stepclass" : "constramp",
-                "mode"      :"wave",
+                "mode"      : "wave",
                 "usteplevel": "1/4",
-                "minstep"   : 0.0015,
-                "startstep" : 0.005,
-                "slope"     : 100
+                "slowtps"   : 120,
+                "fasttps"   : 650,
+                "slope"     : 90
             }
         }
     }

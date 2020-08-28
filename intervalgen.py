@@ -83,12 +83,12 @@ class stepgenonespeed(stepgen):
         """
         generator function for step times.
         
-        yields a sequence of values until motor.stepactive is set False.
+        yields a sequence of fixed step times
         
         command: 'run' or 'goto'.  
-                run only terminates if the motor's stepactive variable is set False. motor.target_dir is monitored as is this instance's step.
+                run only terminates if the motor's stepactive variable is set False. motor.target_dir is monitored as is this instance's steprate.
                 goto will return no step required once target is reached, and terminate if running set False. the motor's targetpos is monitored and
-                direction is changed if necessary. This instance's step variable is monitored.
+                direction is changed if necessary. This instance's steprate variable is monitored.
         
         initialpos: starting position to use only used for goto to track current position relative to target position
         
@@ -97,7 +97,12 @@ class stepgenonespeed(stepgen):
                 0: 1 character string: 'F' or 'R'
                 1: time to next step (this will be same interval)
                 
-            otherwise this returns a single (float) value of time to next step (or None if no step is required)
+            otherwise
+                time to next step
+                 -or-
+                None if in goto mode and reached target
+            
+            if motor.stepactive goes False or mode is onegoto and destination reached, rasies StopIteration
         """
         if self.ticklogf is None:
             tlog=None
@@ -108,7 +113,6 @@ class stepgenonespeed(stepgen):
         activedirection=None                                # which direction motor currently running
         motor=self.motor
         motor.updatetickerparams=True
-        print('softstep 1')
         if isgoto:
             currentposv=initialpos                              # get the current position - we assume we are in control of this so don't re-read it
             while self.motor.stepactive:
@@ -123,7 +127,6 @@ class stepgenonespeed(stepgen):
                         yield newdir, 0.00002 if activedirection is None else usetick
                         if tlog:
                             tlog.write('%s,%7.5f,%d\n' % (newdir, usetick, currentposv))
-                    print('using tick', usetick)
                     motor.updatetickerparams=False
                 if absstepsleft >= usteps:                     # if remaining usteps less than the current step size stop now
                     currentposv += usteps if activedirection =='F' else -usteps
@@ -132,6 +135,8 @@ class stepgenonespeed(stepgen):
                     if tlog:
                         tlog.write('%s,%7.5f,%d\n' % (' ', usetick, currentposv))
                 else:
+                    if command=='onegoto':
+                        break
                     yield None
                     if tlog:
                         tlog.write('X,0,%d\n' % currentposv)
@@ -158,8 +163,6 @@ class stepgenonespeed(stepgen):
 class stepconstacc(stepgen):
     """
     generates step timings with constant slope ramping.
-    
-    See stepgenonespeed for outputs
     """
     def __init__(self, **kwargs):
         wables=[
@@ -172,7 +175,31 @@ class stepconstacc(stepgen):
 
     def tickgen(self, command, initialpos):
         """
-        yields a sequence of
+        generator function for step times.
+        
+        yields a sequence of step times, stopping at target in goto or onegotomode. Speed is ramped up and down and various parameters are monitored to update
+        the generated steps - see under command below.
+        
+        command: 'run' or 'goto'.  
+            run only terminates if the motor's stepactive variable is set False. motor.target_dir is monitored as is this instance's steprate.
+
+            goto will return no step required once target is reached, and terminate if running set False. the motor's targetpos is monitored and
+                direction is changed if necessary. This instance's steprate variable is monitored.
+        
+        initialpos: starting position to use only used for goto to track current position relative to target position
+        
+        returns:
+            when changing direction this returns a 2 - tuple
+                0: 1 character string: 'F' or 'R'
+                1: time to next step (this will be same interval)
+                
+            otherwise
+                time to next step
+                 -or-
+                None if in goto mode and reached target
+            
+            if motor.stepactive goes False or mode is onegoto and destination reached, raises stopiteration
+            Note that the motor will decelerate before StopIteration if stepactive goes false. 
         """
         isgoto=command=='goto' or command=='onegoto'                # goto or move?
         tickpos=initialpos
@@ -216,10 +243,10 @@ class stepconstacc(stepgen):
                         currdir = newdir
                     elif isgoto:
                         if absoffset < usteps/2:                           # and as close as possible to target
-                            print('XXXXXXXXXXXXXXXXXXXXxxxxxat target', absoffset, decelusteps, usteps, target, tickpos)
+                            if command=='onegoto':
+                                break
                             yield None
                         else:
-                            print('nearly.....................................', absoffset)
                             yield currtick                                  # just a bit further.....
                             tickpos += usteps*currdir
                             if isgoto:
@@ -249,7 +276,6 @@ class stepconstacc(stepgen):
 
             else: # speed is max - keep going
                 if ramping:
-                    print('rapmped at', time.time()-xelapsed)
                     ramping=False
                 yield currtick
                 tickpos += usteps*currdir

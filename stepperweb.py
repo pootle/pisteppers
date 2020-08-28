@@ -1,4 +1,4 @@
-import steppers, intervalgen , pagelink
+import intervalgen , pagelink
 
 from pootlestuff.watchables import myagents
 
@@ -16,38 +16,39 @@ class wwenumint(pagelink.wwenum):
         """
         super().websetter([int(x) for x in webval])
 
-class webapp(steppers.multimotor):
-    allfielddefs={ # defines all the fields available at the app level
-        'pigpmspw':     (pagelink.wwlink, 'pigpmspw',   myagents.NONE,  'max us per wave',      tablefieldinputhtml,        
-                        'maximum microseconds per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-        'pigpppw':      (pagelink.wwlink, 'pigpppw',    myagents.NONE,  'max pulses per wave',  tablefieldinputhtml,        
-                        'maximum pulses per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-        'pigpbpw':      (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,       
-                        'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-        'wavepulses':   (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        
-                        'max pulses per wave - if pigpio runs out of CBs, decrease this'),
-        'max_wave_time':(pagelink.wwlink, 'max_wave_time', myagents.user, 'max wave time',      tablefieldinputhtml,
-                        'maximum time per wave in microseconds - limits the worst case time to respond to changes.'),
-        'max_waves':    (pagelink.wwlink, 'max_waves',  myagents.user,  'pending wave count',   tablefieldinputhtml,
-                        'limits the number of waves pre-prepared in wave mode - this includes the active wave'),
-        'mode':         (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       
-                        'motorset controller mode'),
-        'gotonow':       (pagelink.wwbutton,'gotonow',   myagents.user,  'Action',              tablefieldcyclicbtndnhtml,  
+appfields=(# defines all the fields available at the app level
+    (pagelink.wwlink, 'pigpmspw',   myagents.NONE,  'max us per wave',      tablefieldinputhtml,        
+                    'maximum microseconds per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'pigpppw',    myagents.NONE,  'max pulses per wave',  tablefieldinputhtml,        
+                    'maximum pulses per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,       
+                    'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        
+                    'max pulses per wave - if pigpio runs out of CBs, decrease this'),
+    (pagelink.wwlink, 'max_wave_time', myagents.user, 'max wave time',      tablefieldinputhtml,
+                    'maximum time per wave in microseconds - limits the worst case time to respond to changes.'),
+    (pagelink.wwlink, 'max_waves',  myagents.user,  'pending wave count',   tablefieldinputhtml,
+                    'limits the number of waves pre-prepared in wave mode - this includes the active wave'),
+    (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       
+                    'motorset controller mode'),
+    (pagelink.wwbutton,'doitnow',   myagents.user,  'Action',              tablefieldcyclicbtndnhtml,  
                         'starts motors running in their selected mode'),
-    }
+)
+
+from steppergroup import multimotor
+class webapp(multimotor):
+    allfielddefs={ d[1]: d for d in appfields}
+
     def __init__(self, **kwargs):
         self.classdefs=classlookups
         super().__init__(loglvl=wv.loglvls.INFO, **kwargs)
-        self.gotonow.addNotify(self.multigoto, myagents.user)
+        self.doitnow.addNotify(self.multiaction, myagents.user)
 
     def allfields(self, pagelist, fields):
         fielddefs=[self.allfielddefs[fieldname] for fieldname in fields]
         fieldstrs = [defn[0](wable=getattr(self, defn[1]), pagelist=pagelist, updators=defn[2], label=defn[3], shelp=defn[5], **(defn[6] if len(defn) > 6 else {})).
                 webitem(fformat=defn[4]) for defn in fielddefs]
         return ''.join(fieldstrs)
-
-    def makePanel(self, pagelist):
-        return tablesectwrapper.format(style='focusstyle', flipid='xfcs', fields=self.allfields(pagelist,allfielddefs), title='stepper controls')
 
     def makeMainPage(self, pagelist, qp, pp, page, topfields, motorfields):
         """
@@ -101,30 +102,21 @@ class webapp(steppers.multimotor):
             templ=pf.read()
         return {'resp':200, 'headers': (('Content-Type', 'text/html; charset=utf-8'),), 'data':templ.format(pageid = pagelist.pageid, fields=fields)}
 
-    def multigoto(self, oldValue, newValue, agent, watched):
+    def multiaction(self, oldValue, newValue, agent, watched):
         """
-        simple button that starts goto using the modes and targets setup on the individual motors
+        simple button that starts motors using the modes and targets setup on the individual motors
         """
-        assert self.mode.getValue()=='off'
         fastmotors=[]
         for motor in self.motors.values():
             mparams={'command':motor.usercmd.getValue(), 
                     'targetpos':motor.userpos.getValue(),
                     'targetdir':motor.userdir.getValue(),
                     'stepmode':motor.userstepm.getValue()}
-            print('multigoto', motor.name, mparams)
             iomode=motor.dothis(**mparams)
             if iomode=='wave':
                 fastmotors.append((motor,mparams))
         if fastmotors:
             self.runfast(fastmotors)
-
-    def multiupdate(self, oldValue, newValue, agent, watched):
-        """
-        Button for user to cause all parameter values to be updated
-        """
-        for motor in self.motors.values():
-            motor.updatetickerparams=True
 
 class webgroup():
     def __init__(self, webdefs, prefix=''):
@@ -176,7 +168,8 @@ class webbasemotor(webgroup):
                 basefields.update(stepdeffields)
         return basefields
  
-class webstepchipmotor(steppers.A4988stepper, webbasemotor):
+from stepperA4988 import A4988stepper
+class webstepchipmotor(A4988stepper, webbasemotor):
     allfielddefs={
         'drive_enable': (pagelink.wwlink, 'drive_enable',myagents.NONE, 'drive enable pin',tablefieldinputhtml,        
                 'gpio (broadcom) pin used to drive enable this motor', {'liveformat': '{wl.wable.pinno:d}'}),
@@ -196,11 +189,11 @@ class webstepchipmotor(steppers.A4988stepper, webbasemotor):
             ('userpos',     wv.intWatch,    0,                  False),                             # user target pos for goto mode
             ('userdir',     wv.enumWatch,   'fwd',              False,  {'vlist': ('fwd', 'rev')}), # user direction for run mode
         ]
-        steppers.A4988stepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
+        A4988stepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
         webbasemotor.__init__(self, webdefs=self.allfielddefs)
 
-
-class webunimotor(steppers.directstepper, webbasemotor):
+from stepperunid import directstepper
+class webunimotor(directstepper, webbasemotor):
     allfielddefs={
         'holdstopped': (pagelink.wwlink, 'holdstopped',myagents.user,  'stop hold time',  tablefieldinputhtml,        
                'when motor stops, disable output current after this time (in seconds) - 0 means drive chip stays enabled'),
@@ -215,7 +208,7 @@ class webunimotor(steppers.directstepper, webbasemotor):
             ('userpos',     wv.intWatch,    0,                  False),                             # user target pos for goto mode
             ('userdir',     wv.enumWatch,   'fwd',              False,  {'vlist': ('fwd', 'rev')}), # user direction for run mode
         ]
-        steppers.directstepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
+        directstepper.__init__(self, wabledefs=wables, app=app, value=value, name=name, loglevel=loglevel)
         webbasemotor.__init__(self, webdefs=self.allfielddefs)
 
 class websteponespeed(intervalgen.stepgenonespeed, webgroup):

@@ -50,7 +50,7 @@ def setup(settings):
         ''              : ('redirect', '/index.html'),
         'full.html'    : ('makedynampage', (app1.makeMainPage,{
                 'page':         'templates/everything.html', 
-                'topfields':    ('pigpmspw', 'pigpppw', 'pigpbpw', 'mode', 'max_waves', 'max_wave_time', 'wavepulses', 'gotonow'),
+                'topfields':    ('pigpmspw', 'pigpppw', 'pigpbpw', 'mode', 'max_waves', 'max_wave_time', 'wavepulses', 'doitnow'),
                 'motorfields':  {'a4988m1': {'fields':('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn', 
                                                        'drive_enable', 'direction', 'step', 'holdstopped', 'activestepm'),
                                              'stepfields': 1},
@@ -63,7 +63,7 @@ def setup(settings):
                                  }})),
         'index.html'     : ('makedynampage', (app1.makeMainPage,{
                 'page':         'templates/compact.html', 
-                'topfields':    ('mode', 'gotonow'),
+                'topfields':    ('mode', 'doitnow'),
                 'motorfields':  {'a4988m1': {'fields':('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn'),
                                              'stepfields': 0},
                                 'a4988m2':  {'fields': ('usercmd', 'userpos', 'userdir', 'userstepm', 'opmode', 'targetrawpos', 'rawposn'),
