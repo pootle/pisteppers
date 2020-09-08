@@ -16,36 +16,18 @@ class wwenumint(pagelink.wwenum):
         """
         super().websetter([int(x) for x in webval])
 
-appfields=(# defines all the fields available at the app level
-    (pagelink.wwlink, 'pigpmspw',   myagents.NONE,  'max us per wave',      tablefieldinputhtml,        
-                    'maximum microseconds per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-    (pagelink.wwlink, 'pigpppw',    myagents.NONE,  'max pulses per wave',  tablefieldinputhtml,        
-                    'maximum pulses per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-    (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,       
-                    'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
-    (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        
-                    'max pulses per wave - if pigpio runs out of CBs, decrease this'),
-    (pagelink.wwlink, 'max_wave_time', myagents.user, 'max wave time',      tablefieldinputhtml,
-                    'maximum time per wave in microseconds - limits the worst case time to respond to changes.'),
-    (pagelink.wwlink, 'max_waves',  myagents.user,  'pending wave count',   tablefieldinputhtml,
-                    'limits the number of waves pre-prepared in wave mode - this includes the active wave'),
-    (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       
-                    'motorset controller mode'),
-    (pagelink.wwbutton,'doitnow',   myagents.user,  'Action',              tablefieldcyclicbtndnhtml,  
-                        'starts motors running in their selected mode'),
-)
-
-from steppergroup import multimotor
-class webapp(multimotor):
-    allfielddefs={ d[1]: d for d in appfields}
-
-    def __init__(self, **kwargs):
-        self.classdefs=classlookups
-        super().__init__(loglvl=wv.loglvls.INFO, **kwargs)
-        self.doitnow.addNotify(self.multiaction, myagents.user)
+class webtop():
+    def __init__(self, fielddefs):
+        self.allfielddefs={ d[1]: d for d in fielddefs}
 
     def allfields(self, pagelist, fields):
-        fielddefs=[self.allfielddefs[fieldname] for fieldname in fields]
+        try:
+            fielddefs=[self.allfielddefs[fieldname] for fieldname in fields]
+        except KeyError:
+            for fieldname in fields:
+                if not fieldname in self.allfielddefs:
+                    print('requested field %s not found in fields %s' % (fieldname, list(self.allfielddefs.keys())))
+            raise
         fieldstrs = [defn[0](wable=getattr(self, defn[1]), pagelist=pagelist, updators=defn[2], label=defn[3], shelp=defn[5], **(defn[6] if len(defn) > 6 else {})).
                 webitem(fformat=defn[4]) for defn in fielddefs]
         return ''.join(fieldstrs)
@@ -104,7 +86,7 @@ class webapp(multimotor):
 
     def multiaction(self, oldValue, newValue, agent, watched):
         """
-        simple button that starts motors using the modes and targets setup on the individual motors
+        simple button that acts on motors to set values or start them running based on specific params for each motor
         """
         fastmotors=[]
         for motor in self.motors.values():
@@ -117,6 +99,33 @@ class webapp(multimotor):
                 fastmotors.append((motor,mparams))
         if fastmotors:
             self.runfast(fastmotors)
+
+appfields=(# defines all the fields available at the app level
+    (pagelink.wwlink, 'pigpmspw',   myagents.NONE,  'max us per wave',      tablefieldinputhtml,        
+                    'maximum microseconds per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'pigpppw',    myagents.NONE,  'max pulses per wave',  tablefieldinputhtml,        
+                    'maximum pulses per wave (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'pigpbpw',    myagents.NONE,  'max cbs per wave',     tablefieldinputhtml,       
+                    'maximum DMA control blocks (pigpio limit)', {'liveformat': '{wl.varvalue:n}'}),
+    (pagelink.wwlink, 'wavepulses', myagents.user,  'max pulses per wave',  tablefieldinputhtml,        
+                    'max pulses per wave - if pigpio runs out of CBs, decrease this'),
+    (pagelink.wwlink, 'max_wave_time', myagents.user, 'max wave time',      tablefieldinputhtml,
+                    'maximum time per wave in microseconds - limits the worst case time to respond to changes.'),
+    (pagelink.wwlink, 'max_waves',  myagents.user,  'pending wave count',   tablefieldinputhtml,
+                    'limits the number of waves pre-prepared in wave mode - this includes the active wave'),
+    (pagelink.wwenum, 'mode',       myagents.app,   'controller mode',      tablefielddropdnhtml,       
+                    'motorset controller mode'),
+    (pagelink.wwbutton,'doitnow',   myagents.user,  'Action',              tablefieldcyclicbtndnhtml,  
+                        'starts motors running in their selected mode'),
+)
+
+from steppergroup import multimotor
+class webapp(multimotor, webtop):
+    def __init__(self, **kwargs):
+        self.classdefs=classlookups
+        webtop.__init__(self, appfields)
+        multimotor.__init__(self, loglvl=wv.loglvls.INFO, **kwargs)
+        self.doitnow.addNotify(self.multiaction, myagents.user)
 
 class webgroup():
     def __init__(self, webdefs, prefix=''):

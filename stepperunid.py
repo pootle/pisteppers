@@ -185,6 +185,7 @@ class directstepper(basestepper):
                 tickspec=next(tickmaker)
             except StopIteration:
                 yield (0, 0, usclock, newpos, self.name, -1)
+                yield (0, 0, usclock+1, newpos, self.name, -1) # flush final position again
                 break
             if tickspec is None:
                 yield (0,0) + (usclock, newpos, self.name, 1)

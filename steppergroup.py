@@ -14,7 +14,7 @@ import pigpio
 controllermodes=('closed', 'off', 'faststep')
 
 class multimotor(wv.watchablepigpio):
-    def __init__(self, gpiolog=False, loglvl=loglvls.INFO, **kwargs):
+    def __init__(self, gpiolog=False, wabledefs= [], loglvl=loglvls.INFO, **kwargs):
         wables=[
             ('pigpmspw',    wv.intWatch,    0,                  False),
             ('pigpppw',     wv.intWatch,    0,                  False),
@@ -24,7 +24,9 @@ class multimotor(wv.watchablepigpio):
             ('wavepulses',  wv.intWatch,    1000,               True,   {'minv':100}),
             ('max_wave_time', wv.intWatch,  500000,             True,   {'minv': 1000, 'maxv': 1000000}),
             ('max_waves',   wv.intWatch,    3,                  True,   {'minv':2, 'maxv': 9}),
-        ]
+        ] + wabledefs
+        for w in wables:
+            print(w[0])
         if gpiolog:
             from pigpiolog import plog
             pio=plog()
@@ -40,9 +42,8 @@ class multimotor(wv.watchablepigpio):
             if newmotor is None:
                 raise ValueError('motor construction failed for %s' % motname)
             self.motors[motname]=newmotor
-#        self.cmndq=queue.Queue()
-#        self.cthread=threading.Thread(name='controller(%s)' % type(self).__name__, target=self._thrunner)
-#        self.cthread.start()
+        print(self.mode)
+        print(self.alt_target)
 
     def close(self):
         self.cleanstop()
@@ -150,7 +151,7 @@ class multimotor(wv.watchablepigpio):
                             bufftime -= dtime
                             if bufftime <= 0:
                                 break
-                        mposns[thisp[4]]=thisp # 
+                        mposns[thisp[4]]=thisp # update motor's last known position in this buffer
                     if nextbuffi > 0:
 #                        if not logf is None:
 #                            for pp in nextbuff[:nextbuffi]:
@@ -181,6 +182,8 @@ class multimotor(wv.watchablepigpio):
                         if timestart:
                             self.log(loglvls.DEBUG,'startup time:::::::::::::: %6.3f' % (time.time()-timestart))
                             timestart=None
+                    else:
+                        print('zerobuff', nextp)
                 if len(pendingbufs) > 0:
                     current=self.pio.wave_tx_at()
                     if current == 9999:
@@ -219,6 +222,7 @@ class multimotor(wv.watchablepigpio):
                     self.pio.wave_delete(donebuf)
                     endposns = buffends.pop(0)
                     for mn, mp in endposns.items():
+                        print('buffer ends with', mp)
                         self.motors[mn].rawposn.setValue(mp[3], wv.myagents.app)
                         if mp[5] == -1:
                             motors[mp[4]].endstepping()
@@ -234,9 +238,6 @@ class multimotor(wv.watchablepigpio):
             logf.close()
         self.log(loglvls.INFO, "motoset leaving mode fast")
         self.mode.setValue('off', wv.myagents.app)
-#        for motor in motors.values():
-#            motor.endstepping()
-#            motor.dothis(command =   'stop')
         self.mode.setValue('off', wv.myagents.app)
 #            self.log(logging.INFO, self.reporttimelog('fastrun'))
 

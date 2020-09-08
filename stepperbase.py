@@ -51,7 +51,7 @@ class basestepper(wv.watchablepigpio):
     
     opmodes= ('closed', 'stopped', 'softrun', 'dmarun')
 
-    commands=('none', 'close', 'stop', 'goto', 'run', 'onegoto')
+    commands=('none', 'close', 'stop', 'goto', 'run', 'onegoto', 'setpos')
 
     def __init__(self, name, app, value, wabledefs=[], **kwargs):
         """
@@ -103,6 +103,24 @@ class basestepper(wv.watchablepigpio):
         self.opmode.setValue('closed', wv.myagents.app)
 
     def dothis(self, command, targetpos=None, targetdir=None, stepmode=None):
+        """
+        request motor to apply a command.
+        
+        command: 
+            'none':     noop commmand 
+            'close':    shuts down motor - no further actions can be taken on this class instance
+            'stop':     requests motor to stop in a controlled way. For example if the motor is running with ramp=up / down. the maotor will ramp down and stop.
+            'goto':     requests motor moves to 'targetpos' using 'stepmode'. 'targetpos' (and various other params) are monitored and action changes on the fly.
+                        once the target position 'targetpos' continues to be monitored and the motor will respond if it changes. This continues until a 'stop'
+                        is received.
+            'run':      requests the motor moves in 'targetdir' using stepmode until a stop is issued. 'targetdir' (and various other params) are monitored
+                        and action changes on the fly. This continues until a 'stop'
+                        is received.
+            'onegoto':  requests motor moves to 'targetpos' using 'stepmode'. Once the target is reached the motor stops.
+            'setpos' :  if the motor is currently stopped the current position is changed to 'targetpos' without moving the motor.
+        """
+        if command=='None':
+            return
         curmode=self.opmode.getValue()
         if curmode=='closed':
             raise ValueError('motor %s is closed - cannot respond.' % self.name)
@@ -142,6 +160,11 @@ class basestepper(wv.watchablepigpio):
                 self.drive_enable.setValue('disable', wv.myagents.app)
             elif curmode=='softrun' or curmode=='dmarun':
                 self.stepactive=False
+        elif command=='setpos':
+            if curmode=='stopped':
+                self.rawposn.setValue(int(targetpos), wv.myagents.app)
+            else:
+                raise ValueError('cannot set position in mode %s' % curmode)
         return None
 
     def dmarun(self, stepmode, **kwargs):
